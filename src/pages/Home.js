@@ -78,7 +78,7 @@ function Home() {
     if (!myId) return;
 
     // Сообщения WebSocket — для бейджей непрочитанных
-    const ws = new WebSocket(`ws://localhost:8000/ws/${myId}`);
+    const ws = new WebSocket(`wss://web-production-c6791.up.railway.app/ws/${myId}`);
     wsRef.current = ws;
 
     ws.onmessage = (event) => {
@@ -95,7 +95,7 @@ function Home() {
     };
 
     // Звонки WebSocket — для входящих звонков
-    const callWs = new WebSocket(`ws://localhost:8000/calls/ws/${myId}`);
+    const callWs = new WebSocket(`wss://web-production-c6791.up.railway.app/calls/ws/${myId}`);
 
     callWs.onmessage = (event) => {
       const signal = JSON.parse(event.data);
