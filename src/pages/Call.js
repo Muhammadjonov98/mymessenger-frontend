@@ -142,7 +142,7 @@ function Call() {
   // ==========================================
   const wsGaUlan = () => {
     // Открываем WebSocket соединение с сигналинг сервером
-    const ws = new WebSocket(`wss://web-production-c6791.up.railway.app/calls/ws/${myId}`);
+    const ws = new WebSocket(`wss://mymessenger-backend.onrender.com/calls/ws/${myId}`);
     wsRef.current = ws;
 
     ws.onopen = () => {

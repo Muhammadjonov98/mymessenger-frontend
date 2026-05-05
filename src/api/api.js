@@ -6,7 +6,7 @@
 import axios from 'axios';
 
 // Сервер manzili
-const BASE_URL = 'https://web-production-c6791.up.railway.app';
+const BASE_URL = 'https://mymessenger-backend.onrender.com';
 
 // Axios instance — barcha so'rovlar uchun
 const api = axios.create({

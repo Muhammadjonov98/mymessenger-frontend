@@ -95,7 +95,7 @@ function Home() {
     };
 
     // Звонки WebSocket — для входящих звонков
-    const callWs = new WebSocket(`wss://web-production-c6791.up.railway.app/calls/ws/${myId}`);
+    const callWs = new WebSocket(`wss://mymessenger-backend.onrender.com/calls/ws/${myId}`);
 
     callWs.onmessage = (event) => {
       const signal = JSON.parse(event.data);

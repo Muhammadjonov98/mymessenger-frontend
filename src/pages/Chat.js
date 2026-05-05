@@ -85,7 +85,7 @@ function Chat() {
     if (wsRef.current) {
       wsRef.current.close();
     }
-    const ws = new WebSocket(`wss://web-production-c6791.up.railway.app/ws/${myId}`);
+    const ws = new WebSocket(`wss://mymessenger-backend.onrender.com/ws/${myId}`);
     wsRef.current = ws;
 
     ws.onopen = () => setConnected(true);
