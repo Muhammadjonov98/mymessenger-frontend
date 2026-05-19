@@ -1,6 +1,6 @@
 // ==========================================
-// СТРАНИЦА ЧАТА
-// Сообщения в реальном времени через WebSocket + файлы
+// CHAT.JS — TOLIQ TUZATILGAN VERSIYA
+// Xabar, fayl, ovoz va qongiroq funksiyalari
 // ==========================================
 
 import { useState, useEffect, useRef } from 'react';
@@ -17,16 +17,31 @@ function Chat() {
   const chatUser = location.state?.user;
   const otherUserId = parseInt(userId);
 
+  // ==========================================
+  // REFS
+  // ==========================================
   const wsRef = useRef(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const typingTimeoutRef = useRef(null);
 
+  // ==========================================
+  // STATES
+  // ==========================================
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [connected, setConnected] = useState(false);
-  const [yozayapti] = useState(false);
   const [faylYuklanmoqda, setFaylYuklanmoqda] = useState(false);
+  const [otherUserOnline, setOtherUserOnline] = useState(false);
+  const [ovozYuzmoqda, setOvozYuzmoqda] = useState(false);
+  const [ovozVaqti, setOvozVaqti] = useState(0);
+  const [otherUserTyping, setOtherUserTyping] = useState(false);
 
+  // ==========================================
+  // TRANSLATIONS
+  // ==========================================
   const TILLAR = {
     uz: {
       xabarYoz: 'Xabar yozing...',
@@ -35,6 +50,8 @@ function Chat() {
       yozayapti: 'yozayapti...',
       boyChat: 'Salom deng! Chat boshlang 👋',
       faylYuklanmoqda: 'Fayl yuklanmoqda...',
+      ovozYuborish: 'Ovozli xabar yuzoramiz...',
+      sahifani_orqaga: 'Orqaga',
     },
     ru: {
       xabarYoz: 'Написать сообщение...',
@@ -43,6 +60,8 @@ function Chat() {
       yozayapti: 'печатает...',
       boyChat: 'Скажите привет! Начните чат 👋',
       faylYuklanmoqda: 'Загрузка файла...',
+      ovozYuborish: 'Записываем голос...',
+      sahifani_orqaga: 'Назад',
     },
     en: {
       xabarYoz: 'Write a message...',
@@ -51,111 +70,298 @@ function Chat() {
       yozayapti: 'typing...',
       boyChat: 'Say hello! Start chatting 👋',
       faylYuklanmoqda: 'Uploading file...',
+      ovozYuborish: 'Recording voice...',
+      sahifani_orqaga: 'Back',
     },
   };
 
   const t = (key) => TILLAR[til]?.[key] || key;
 
-  useEffect(() => {
-    if (!myId) return;
-    if (Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-    wsGaUlan();
-    tarixniYukla();
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-    };
-  }, [myId, userId]);
+  // ==========================================
+  // OVOZLI XABAR FUNKSIYALARI
+  // ==========================================
 
+  // ✅ OVOZLI XABAR - BOSHLASH
+  const ovozYozishiBoshla = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      // MIME types - brauzer turiga qarab
+      let mimeType = 'audio/webm';
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        mimeType = 'audio/webm;codecs=opus';
+      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+        mimeType = 'audio/mp4';
+      } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
+        mimeType = 'audio/ogg';
+      }
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      let recordingTime = 0;
+      const recordingInterval = setInterval(() => {
+        recordingTime++;
+        setOvozVaqti(recordingTime);
+        if (recordingTime > 600) { // Max 10 daqiqa
+          clearInterval(recordingInterval);
+          ovozYuborishni();
+        }
+      }, 1000);
+
+      recorder.ondataavailable = (event) => {
+        audioChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = () => {
+        clearInterval(recordingInterval);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      recorder.start();
+      setOvozYuzmoqda(true);
+      setOvozVaqti(0);
+      console.log('🎙️ Ovoz yozish boshlandi, MIME:', mimeType);
+
+    } catch (err) {
+      console.error('Mikrofon xatosi:', err);
+      alert('Mikrofonga ruxsat berishingi shukayt!');
+    }
+  };
+
+  // ✅ OVOZLI XABAR - TUGATISH VA YUBORISH
+  const ovozYuborishni = async () => {
+    if (!mediaRecorderRef.current) return;
+
+    mediaRecorderRef.current.stop();
+    setOvozYuzmoqda(false);
+
+    setTimeout(async () => {
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+
+      console.log('🎙️ Ovoz blob hajmi:', audioBlob.size, 'bytes');
+
+      if (audioBlob.size < 2048) { // 2 KB minimal
+        alert('Ovozli xabar juda qisqa!');
+        audioChunksRef.current = [];
+        return;
+      }
+
+      setFaylYuklanmoqda(true);
+
+      try {
+        const file = new File([audioBlob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+        console.log('📤 Ovoz yuklash: ', file.name);
+
+        const res = await filesAPI.uploadVoice(file);
+        const { url, tur } = res.data;
+
+        console.log('✅ Ovoz yuklandi:', url);
+
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            receiver_id: otherUserId,
+            content: '🎙️ Ovozli xabar',
+            file_url: url,
+            file_type: tur,
+          }));
+        }
+      } catch (err) {
+        console.error('Ovoz yuklanmadi:', err);
+        alert(`Ovozli xabar yuklashda xato: ${err.response?.data?.detail || err.message}`);
+      }
+
+      setFaylYuklanmoqda(false);
+      audioChunksRef.current = [];
+    }, 100);
+  };
+
+  // ==========================================
+  // XABAR FUNKSIYALARI
+  // ==========================================
+
+  // Tarixni yuklash
   const tarixniYukla = async () => {
     try {
       const res = await messagesAPI.getHistory(userId, myId);
       setMessages(res.data);
       pastgaTush();
     } catch (e) {
-      console.error('Ошибка загрузки истории:', e);
+      console.error('Tarix yuklanmadi:', e);
     }
   };
 
+  // WebSocket ulanish
   const wsGaUlan = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
     const ws = new WebSocket(`wss://mymessenger-backend.onrender.com/ws/${myId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      console.log('✅ Chat WebSocket ulandi');
+      setConnected(true);
+    };
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.xato) return;
+      try {
+        const data = JSON.parse(event.data);
 
-      if (data.type === 'oqildi_signal') {
-        if (data.receiver_id === otherUserId) {
-          setMessages((prev) =>
-            prev.map((x) =>
-              x.sender_id === myId ? { ...x, is_read: true } : x
-            )
-          );
+        // ✅ KELAYOTGAN QONGIROQ
+        if (data.tur === 'kelayotgan_qongiroq' && data.caller_id === otherUserId) {
+          navigate('/call', {
+            state: {
+              otherUser: chatUser,
+              qongiroqTuri: data.qongiroq_turi,
+              chaqiruvchi: false,
+              callerId: data.caller_id,
+            }
+          });
+          return;
         }
-        return;
-      }
 
-      if (data.type === 'xabar') {
-        const ushbuChatMi =
-          data.sender_id === otherUserId ||
-          data.receiver_id === otherUserId;
-        if (!ushbuChatMi) return;
-
-        if (data.sender_id === otherUserId) {
-          setMessages((prev) => [...prev, { ...data, is_read: true }]);
-          pastgaTush();
-          if (Notification.permission === 'granted') {
-            new Notification(chatUser?.full_name || 'Yangi xabar', {
-              body: data.file_url ? '📎 Fayl yuborildi' : data.content,
-              icon: '/logo192.png',
-            });
+        // ✅ READ RECEIPT
+        if (data.type === 'oqildi_signal') {
+          if (data.message_id) {
+            setMessages(prev =>
+              prev.map(msg =>
+                msg.id === data.message_id ? { ...msg, is_read: true } : msg
+              )
+            );
           }
-          if (data.id) messagesAPI.markRead(data.id);
+          return;
         }
 
-        if (data.sender_id === myId) {
-          setMessages((prev) => [...prev, { ...data, is_read: false }]);
-          pastgaTush();
+        // ✅ USER TYPING
+        if (data.type === 'user_typing') {
+          if (data.user_id === otherUserId) {
+            setOtherUserTyping(data.status === 'typing');
+          }
+          return;
         }
+
+        // ✅ ONLINE STATUS
+        if (data.type === 'user_online' && data.user_id === otherUserId) {
+          setOtherUserOnline(true);
+          return;
+        }
+
+        if (data.type === 'user_offline' && data.user_id === otherUserId) {
+          setOtherUserOnline(false);
+          return;
+        }
+
+        // ✅ NEW MESSAGE
+        if (data.type === 'xabar') {
+          const isForThisChat = (data.sender_id === otherUserId && data.receiver_id === myId) ||
+                                (data.sender_id === myId && data.receiver_id === otherUserId);
+
+          if (!isForThisChat) return;
+
+          if (data.sender_id === otherUserId) {
+            setMessages(prev => [...prev, { ...data, is_read: true }]);
+            pastgaTush();
+
+            // Push notification
+            if (Notification.permission === 'granted' && document.hidden) {
+              let title = chatUser?.full_name || 'Yangi xabar';
+              let body = data.file_url ?
+                (data.file_type === 'ovoz' ? '🎙️ Ovozli xabar' : '📎 Fayl yuborildi') :
+                data.content;
+
+              new Notification(title, {
+                body: body,
+                icon: '/logo192.png',
+                tag: `msg-${data.sender_id}`,
+              });
+            }
+
+            // Mark as read
+            if (data.id && wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                type: 'mark_read',
+                message_id: data.id
+              }));
+            }
+          } else if (data.sender_id === myId) {
+            setMessages(prev => [...prev, data]);
+            pastgaTush();
+          }
+        }
+      } catch (err) {
+        console.error('WebSocket xatosi:', err);
       }
     };
 
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
+    ws.onclose = () => {
+      console.log('❌ Chat WebSocket yopildi');
+      setConnected(false);
+      setTimeout(wsGaUlan, 3000);
+    };
+
+    ws.onerror = (err) => {
+      console.error('WebSocket xatosi:', err);
+    };
   };
 
+  // Xabar yuborish
   const xabarYuborish = () => {
     const matn = newMessage.trim();
     if (!matn || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
     wsRef.current.send(JSON.stringify({
       receiver_id: otherUserId,
       content: matn,
     }));
     setNewMessage('');
+    setOtherUserTyping(false);
   };
 
+  // Typing signal
+  const typingSignalYuborish = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'typing',
+      receiver_id: otherUserId,
+      status: 'typing'
+    }));
+
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'typing',
+          receiver_id: otherUserId,
+          status: 'stopped'
+        }));
+      }
+    }, 1000);
+  };
+
+  // Fayl tanlash
   const faylTanlash = () => {
     fileInputRef.current?.click();
   };
 
+  // Fayl yuborish
   const faylYuborish = async (e) => {
     const fayl = e.target.files[0];
     if (!fayl) return;
     e.target.value = '';
     setFaylYuklanmoqda(true);
+
     try {
       const res = await filesAPI.upload(fayl);
       const { url, tur, asl_nom } = res.data;
+
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           receiver_id: otherUserId,
@@ -165,8 +371,8 @@ function Chat() {
         }));
       }
     } catch (err) {
-      console.error('Ошибка загрузки файла:', err);
-      alert('Fayl yuklashda xato yuz berdi!');
+      console.error('Fayl yuklanmadi:', err);
+      alert(`Fayl yuklashda xato: ${err.response?.data?.detail || err.message}`);
     }
     setFaylYuklanmoqda(false);
   };
@@ -175,6 +381,13 @@ function Chat() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       xabarYuborish();
+    }
+  };
+
+  const handleMessageChange = (e) => {
+    setNewMessage(e.target.value);
+    if (e.target.value.trim()) {
+      typingSignalYuborish();
     }
   };
 
@@ -190,21 +403,15 @@ function Chat() {
     return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
   };
 
-  // Xabar tarkibini ko'rsatish — matn, rasm, video yoki hujjat
+  // Xabar mazmuni rendering
   const xabarKontent = (xabar, menYubordim) => {
     if (!xabar.file_url) {
-      // Oddiy matn xabari
-      return (
-        <div style={styles.xabarMatn}>
-          {xabar.content}
-        </div>
-      );
+      return <div style={styles.xabarMatn}>{xabar.content}</div>;
     }
 
     const fullUrl = filesAPI.toFullUrl(xabar.file_url);
 
     if (xabar.file_type === 'rasm') {
-      // Rasm xabari
       return (
         <div>
           <img
@@ -221,7 +428,6 @@ function Chat() {
     }
 
     if (xabar.file_type === 'video') {
-      // Video xabari
       return (
         <div>
           <video src={fullUrl} controls style={styles.videoXabar} />
@@ -232,32 +438,64 @@ function Chat() {
       );
     }
 
-    // Hujjat yoki boshqa fayl
+    // ✅ OVOZLI XABAR
+    if (xabar.file_type === 'ovoz') {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px' }}>
+          <span>🎙️</span>
+          <audio
+            src={fullUrl}
+            controls
+            style={{ maxWidth: 200, height: 30 }}
+          />
+        </div>
+      );
+    }
+
     return (
-      <a
-        href={fullUrl}
-        target="_blank"
-        rel="noreferrer"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '8px 0',
-          textDecoration: 'none',
-          fontWeight: '500',
-          fontSize: 14,
-          color: menYubordim ? 'white' : '#2AABEE',
-        }}
-      >
+      <a href={fullUrl} target="_blank" rel="noreferrer" style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 0',
+        textDecoration: 'none',
+        fontWeight: '500',
+        fontSize: 14,
+        color: menYubordim ? 'white' : '#2AABEE',
+      }}>
         {'📄 ' + xabar.content}
       </a>
     );
   };
 
+  // ==========================================
+  // EFFECTS
+  // ==========================================
+
+  useEffect(() => {
+    if (!myId) return;
+    tarixniYukla();
+    wsGaUlan();
+
+    if (Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      clearTimeout(typingTimeoutRef.current);
+    };
+  }, [myId, userId]);
+
+  // ==========================================
+  // RENDER
+  // ==========================================
+
   return (
     <div style={styles.container}>
-
-      {/* ВЕРХНЯЯ ПАНЕЛЬ */}
+      {/* HEADER */}
       <div style={styles.appBar}>
         <button onClick={() => navigate('/home')} style={styles.orqaBtn}>
           ‹
@@ -266,47 +504,38 @@ function Chat() {
           {chatUser?.full_name?.[0]?.toUpperCase() || '?'}
         </div>
         <div style={styles.userInfo}>
-          <div style={styles.userIsm}>
-            {chatUser?.full_name || 'Foydalanuvchi'}
-          </div>
+          <div style={styles.userIsm}>{chatUser?.full_name || 'Foydalanuvchi'}</div>
           <div style={styles.userHolat}>
-            {yozayapti
-              ? ('✍️ ' + t('yozayapti'))
-              : connected
-              ? ('🟢 ' + t('onlayn'))
-              : ('⚫ ' + t('oflayn'))}
+            {otherUserOnline ? `🟢 ${t('onlayn')}` : `⚫ ${t('oflayn')}`}
           </div>
         </div>
         <div style={styles.tugmalar}>
-           <button
-             style={styles.ikonBtn}
-             onClick={() => navigate('/call', {
-               state: {
-                 otherUser: chatUser,
-                  qongiroqTuri: 'ovoz',
-                  chaqiruvchi: true,
-                  callerId: null,
-               }
-             })}
-           >
-             📞
-           </button>
-           <button
-             style={styles.ikonBtn}
-             onClick={() => navigate('/call', {
-               state: {
-                 otherUser: chatUser,
-                  qongiroqTuri: 'video',
-                  chaqiruvchi: true,
-                  callerId: null,
-               }
-             })}
-            >
-             📹
-           </button>
+          <button
+            style={styles.ikonBtn}
+            onClick={() => navigate('/call', {
+              state: {
+                otherUser: chatUser,
+                qongiroqTuri: 'ovoz',
+                chaqiruvchi: true,
+                callerId: null,
+              }
+            })}
+          >📞</button>
+          <button
+            style={styles.ikonBtn}
+            onClick={() => navigate('/call', {
+              state: {
+                otherUser: chatUser,
+                qongiroqTuri: 'video',
+                chaqiruvchi: true,
+                callerId: null,
+              }
+            })}
+          >📹</button>
         </div>
       </div>
-      {/* ОБЛАСТЬ СООБЩЕНИЙ */}
+
+      {/* MESSAGES */}
       <div style={styles.xabarlarQism}>
         {messages.length === 0 ? (
           <div style={styles.boyChat}>
@@ -317,6 +546,7 @@ function Chat() {
           messages.map((xabar, index) => {
             const menYubordim = xabar.sender_id === myId;
             const fayllimi = xabar.file_type === 'rasm' || xabar.file_type === 'video';
+
             return (
               <div
                 key={xabar.id || index}
@@ -336,7 +566,6 @@ function Chat() {
                   }}
                 >
                   {xabarKontent(xabar, menYubordim)}
-
                   <div style={{
                     ...styles.xabarPastki,
                     padding: fayllimi ? '0 8px 4px' : 0,
@@ -351,9 +580,7 @@ function Chat() {
                       <span style={{
                         fontSize: 11,
                         marginLeft: 4,
-                        color: xabar.is_read
-                          ? 'rgba(255,255,255,1)'
-                          : 'rgba(255,255,255,0.5)',
+                        color: xabar.is_read ? 'rgba(255,255,255,1)' : 'rgba(255,255,255,0.5)',
                       }}>
                         {xabar.is_read ? '✓✓' : '✓'}
                       </span>
@@ -364,10 +591,18 @@ function Chat() {
             );
           })
         )}
+
+        {/* Typing indicator */}
+        {otherUserTyping && (
+          <div style={styles.typingIndicator}>
+            <span>🟢 {t('yozayapti')}</span>
+          </div>
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 
-      {/* ПОЛЕ ВВОДА */}
+      {/* INPUT */}
       <div style={styles.inputQism}>
         <input
           ref={fileInputRef}
@@ -376,36 +611,80 @@ function Chat() {
           accept="image/*,video/*,.pdf,.doc,.docx,.txt"
           onChange={faylYuborish}
         />
-        <button
-          style={{ ...styles.ikonBtn, opacity: faylYuklanmoqda ? 0.5 : 1 }}
-          onClick={faylTanlash}
-          disabled={faylYuklanmoqda}
-        >
-          {faylYuklanmoqda ? '⏳' : '📎'}
-        </button>
-        <textarea
-          style={styles.input}
-          placeholder={faylYuklanmoqda ? t('faylYuklanmoqda') : t('xabarYoz')}
-          value={newMessage}
-          onChange={(e) => setNewMessage(e.target.value)}
-          onKeyPress={handleKeyPress}
-          rows={1}
-          disabled={faylYuklanmoqda}
-        />
-        <button
-          style={{
-            ...styles.yuborishBtn,
-            background: newMessage.trim() && !faylYuklanmoqda ? '#2AABEE' : '#ccc',
-          }}
-          onClick={xabarYuborish}
-          disabled={!newMessage.trim() || faylYuklanmoqda}
-        >
-          ➤
-        </button>
+
+        {/* ✅ OVOZLI XABAR TUGMALARI */}
+        {ovozYuzmoqda ? (
+          <>
+            <button
+              style={{
+                ...styles.ikonBtn,
+                background: '#ff3b30',
+                borderRadius: '50%',
+                color: 'white',
+                width: 44,
+                height: 44,
+              }}
+              onClick={ovozYuborishni}
+            >✓</button>
+            <div style={{
+              flex: 1,
+              textAlign: 'center',
+              color: '#666',
+              fontSize: 14,
+            }}>
+              🎙️ {t('ovozYuborish')} ({ovozVaqti}s)
+            </div>
+          </>
+        ) : (
+          <>
+            <button
+              style={{ ...styles.ikonBtn, opacity: faylYuklanmoqda ? 0.5 : 1 }}
+              onClick={faylTanlash}
+              disabled={faylYuklanmoqda}
+            >{faylYuklanmoqda ? '⏳' : '📎'}</button>
+
+            <button
+              style={{ ...styles.ikonBtn }}
+              onMouseDown={ovozYozishiBoshla}
+              onMouseUp={ovozYuborishni}
+              onTouchStart={(e) => {
+                e.preventDefault();
+                ovozYozishiBoshla();
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                ovozYuborishni();
+              }}
+            >🎙️</button>
+
+            <textarea
+              style={styles.input}
+              placeholder={faylYuklanmoqda ? t('faylYuklanmoqda') : t('xabarYoz')}
+              value={newMessage}
+              onChange={handleMessageChange}
+              onKeyPress={handleKeyPress}
+              rows={1}
+              disabled={faylYuklanmoqda}
+            />
+
+            <button
+              style={{
+                ...styles.yuborishBtn,
+                background: newMessage.trim() && !faylYuklanmoqda ? '#2AABEE' : '#ccc',
+              }}
+              onClick={xabarYuborish}
+              disabled={!newMessage.trim() || faylYuklanmoqda}
+            >➤</button>
+          </>
+        )}
       </div>
     </div>
   );
 }
+
+// ==========================================
+// STYLES
+// ==========================================
 
 const styles = {
   container: {
@@ -456,6 +735,7 @@ const styles = {
     cursor: 'pointer',
     padding: '4px 8px',
     borderRadius: 8,
+    color: 'white',
   },
   xabarlarQism: {
     flex: 1,
@@ -503,6 +783,15 @@ const styles = {
     maxHeight: 300,
     borderRadius: 12,
     display: 'block',
+  },
+  typingIndicator: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '8px 16px',
+    color: '#999',
+    fontSize: 13,
+    fontStyle: 'italic',
   },
   inputQism: {
     display: 'flex',

@@ -1,74 +1,62 @@
 // ==========================================
 // API — Сервер bilan ishlash
-// Barcha server so'rovlari shu yerda
 // ==========================================
 
 import axios from 'axios';
 
-// Сервер manzili
 const BASE_URL = 'https://mymessenger-backend.onrender.com';
+const WS_BASE = 'wss://mymessenger-backend.onrender.com';
 
-// Axios instance — barcha so'rovlar uchun
 const api = axios.create({
   baseURL: BASE_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
 });
 
-// Har bir so'rovda tokenni avtomatik qo'shamiz
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
+  if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
 // ==========================================
-// AUTH API — Аутентификация
+// AUTH API
 // ==========================================
 export const authAPI = {
-  // Tizimga kirish
   login: (username, password) =>
     api.post('/auth/login', { username, password }),
 
-  // Ro'yxatdan o'tish
   register: (username, password, full_name) =>
     api.post('/auth/register', { username, password, full_name }),
 
-  // Profil ma'lumotlari
-  me: (token) => api.get(`/auth/me?token=${token}`),
+  me: (token) =>
+    api.get(`/auth/me?token=${token}`),
 };
 
 // ==========================================
-// USERS API — Foydalanuvchilar
+// USERS API
 // ==========================================
 export const usersAPI = {
-  // Barcha foydalanuvchilar ro'yxati
-  getAll: () => api.get('/users'),
+  getAll: () =>
+    api.get('/users'),
 };
 
 // ==========================================
-// MESSAGES API — Xabarlar
+// MESSAGES API
 // ==========================================
 export const messagesAPI = {
-  // Xabarlar tarixi
   getHistory: (userId, myId) =>
     api.get(`/messages/${userId}?current_user_id=${myId}`),
 
-  // O'qildi deb belgilash
   markRead: (messageId) =>
     api.post(`/messages/${messageId}/read`),
 };
 
 // ==========================================
-// FILES API — Fayllar
+// FILES API - TOLIQ TUZATILGAN
 // ==========================================
 export const filesAPI = {
-  // Rasm, video yoki hujjat yuklash
+  // Oddiy fayl yuklash (rasm, video, hujjat)
   upload: (file) => {
-    // Fayl yuklash uchun FormData ishlatamiz
     const formData = new FormData();
     formData.append('file', file);
     return api.post('/files/upload', formData, {
@@ -76,14 +64,39 @@ export const filesAPI = {
     });
   },
 
-  // Fayl URL sini to'liq manzilga aylantirish
-  // Masalan: "/files/download/rasm/abc.jpg" -> "http://localhost:8000/files/download/rasm/abc.jpg"
+  // ✅ OVOZLI XABAR YUKLASH
+  uploadVoice: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/files/voice', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
+  // To'liq URL yaratish
   toFullUrl: (url) => `${BASE_URL}${url}`,
+
+  // Fayllar ro'yxatini olish
+  getList: (tur) =>
+    api.get(`/files/list/${tur}`),
 };
 
-// Render free plan ni uyg'otib turish uchun — har 4 daqiqada ping
+// ==========================================
+// WEBSOCKET URL LAR
+// ==========================================
+export const getWsUrl = (userId) =>
+  `${WS_BASE}/ws/${userId}`;
+
+export const getCallWsUrl = (userId) =>
+  `${WS_BASE}/calls/ws/${userId}`;
+
+// ==========================================
+// KEEP ALIVE - Server vaqt o'tganda qo'ymaydi
+// ==========================================
 setInterval(() => {
-  fetch('https://mymessenger-backend.onrender.com/')
-    .catch(() => {}); // Xatoni e'tiborsiz qoldiramiz
-}, 4 * 60 * 1000);
+  fetch(`${BASE_URL}/`).catch(() => {
+    console.log('Keep-alive ping');
+  });
+}, 4 * 60 * 1000); // 4 daqiqa
+
 export default api;
