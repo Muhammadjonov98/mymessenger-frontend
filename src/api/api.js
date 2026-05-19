@@ -81,4 +81,9 @@ export const filesAPI = {
   toFullUrl: (url) => `${BASE_URL}${url}`,
 };
 
+// Render free plan ni uyg'otib turish uchun — har 4 daqiqada ping
+setInterval(() => {
+  fetch('https://mymessenger-backend.onrender.com/')
+    .catch(() => {}); // Xatoni e'tiborsiz qoldiramiz
+}, 4 * 60 * 1000);
 export default api;

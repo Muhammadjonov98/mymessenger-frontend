@@ -1,6 +1,7 @@
 // ==========================================
 // СТРАНИЦА ЗВОНКА
 // Полноэкранный интерфейс WebRTC звонка — голосовой и видео
+// Исправленная версия с корректным потоком сигнализации
 // ==========================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -12,185 +13,249 @@ function Call() {
   const location = useLocation();
   const { userId: myId } = useStore();
 
-  // Параметры звонка переданные через navigate state
+  // ==========================================
+  // ПАРАМЕТРЫ ЗВОНКА (передаются через navigate state)
+  // ==========================================
   const {
     otherUser,        // Объект собеседника {id, full_name}
-    qongiroqTuri,     // Тип звонка: "ovoz" или "video"
-    chaqiruvchi,      // true — мы звоним, false — нам звонят
-    callerId,         // ID звонящего (если нам звонят)
+    qongiroqTuri,     // Тип звонка: "ovoz" — голосовой, "video" — видео
+    chaqiruvchi,      // true — мы звоним (инициатор), false — нам звонят (принимающий)
+    callerId,         // ID звонящего (нужен, если нам звонят)
   } = location.state || {};
 
   // ==========================================
   // СОСТОЯНИЯ ЗВОНКА
   // ==========================================
 
-  // Текущее состояние: "kutish" | "ulashmoqda" | "ulandi" | "tugadi"
+  // Текущее состояние соединения:
+  // "kutish"      — ожидание ответа на входящий звонок
+  // "ulashmoqda"  — установка соединения (обмен SDP и ICE)
+  // "ulandi"      — соединение установлено, идёт разговор
+  // "tugadi"      — звонок завершён
   const [holat, setHolat] = useState(chaqiruvchi ? 'ulashmoqda' : 'kutish');
 
-  // Длительность звонка в секундах
+  // Длительность разговора в секундах (отображается как таймер)
   const [davomiylik, setDavomiylik] = useState(0);
 
-  // Микрофон выключен
+  // Состояние микрофона: true — включён, false — выключен (mute)
   const [mikrofon, setMikrofon] = useState(true);
 
-  // Динамик выключен
+  // Состояние динамика: true — включён, false — выключен
   const [dinamik, setDinamik] = useState(true);
 
-  // Камера выключена (только для видео звонка)
+  // Состояние камеры: true — включена, false — выключена
   const [kamera, setKamera] = useState(true);
 
-  // Ошибка подключения
+  // Сообщение об ошибке (если есть)
   const [xato, setXato] = useState(null);
 
   // ==========================================
-  // РЕФЫ — НЕ ВЫЗЫВАЮТ ПЕРЕРЕНДЕР
+  // ССЫЛКИ (refs) — не вызывают перерендер компонента
+  // Используются для хранения мутабельных данных
   // ==========================================
 
-  // WebSocket соединение для сигналинга
+  // WebSocket соединение для обмена сигналами (сигнализация)
   const wsRef = useRef(null);
 
-  // RTCPeerConnection — основной объект WebRTC
+  // RTCPeerConnection — главный объект WebRTC соединения
   const pcRef = useRef(null);
 
-  // Локальный медиапоток (наш микрофон/камера)
+  // Локальный медиапоток (микрофон + камера пользователя)
   const lokalOqim = useRef(null);
 
-  // Таймер длительности звонка
+  // Идентификатор интервала для таймера длительности
   const taymerRef = useRef(null);
 
-  // Видео элементы
-  const lokalVideoRef = useRef(null);   // Наше видео (маленькое)
-  const uzoqVideoRef = useRef(null);    // Видео собеседника (большое)
+  // Флаг для отслеживания, был ли уже создан offer
+  // Предотвращает повторное создание offer при дублирующихся сигналах
+  const offerYaratildi = useRef(false);
+
+  // Ссылки на DOM-элементы видео
+  const lokalVideoRef = useRef(null);   // Локальное видео (своё, маленькое окно)
+  const uzoqVideoRef = useRef(null);    // Удалённое видео (собеседник, полный экран)
 
   // ==========================================
-  // ИНИЦИАЛИЗАЦИЯ — подключаемся при монтировании
+  // ИНИЦИАЛИЗАЦИЯ ПРИ МОНТИРОВАНИИ КОМПОНЕНТА
+  // Запускается один раз при открытии страницы звонка
   // ==========================================
   useEffect(() => {
+    // Если нет ID пользователя или данных о собеседнике — возвращаемся назад
     if (!myId || !otherUser) {
-      // Если нет данных — возвращаемся назад
       navigate(-1);
       return;
     }
 
-    // Запускаем инициализацию звонка
+    // Запускаем процесс инициализации звонка
     boshlash();
 
-    // Очистка при размонтировании компонента
+    // Cleanup функция — вызывается при размонтировании компонента
+    // Очищает все ресурсы: медиа, WebSocket, PeerConnection
     return () => {
       tozalash();
     };
-  }, []);
+  }, []); // Пустой массив зависимостей — эффект срабатывает только при монтировании
 
   // ==========================================
-  // ТАЙМЕР ДЛИТЕЛЬНОСТИ ЗВОНКА
-  // Запускается когда соединение установлено
+  // ЗАПУСК ТАЙМЕРА ДЛИТЕЛЬНОСТИ РАЗГОВОРА
+  // Вызывается когда соединение установлено (connectionState === 'connected')
   // ==========================================
-  const taymerniBoshlash = () => {
-    // Сбрасываем предыдущий таймер если был
-    if (taymerRef.current) clearInterval(taymerRef.current);
+  const taymerniBoshlash = useCallback(() => {
+    // Сбрасываем предыдущий таймер, если он существовал
+    if (taymerRef.current) {
+      clearInterval(taymerRef.current);
+    }
 
-    // Запускаем новый таймер — каждую секунду увеличиваем счётчик
+    // Запускаем новый интервал — каждую секунду увеличиваем счётчик на 1
     taymerRef.current = setInterval(() => {
       setDavomiylik((prev) => prev + 1);
     }, 1000);
-  };
+  }, []);
 
   // ==========================================
-  // ФОРМАТИРОВАНИЕ ВРЕМЕНИ — "01:23"
+  // ФОРМАТИРОВАНИЕ ВРЕМЕНИ В ФОРМАТ "ММ:СС"
+  // Принимает количество секунд, возвращает строку вида "01:23"
   // ==========================================
   const vaqtFormat = (soniya) => {
-    // Вычисляем минуты и секунды из общего количества секунд
-    const d = Math.floor(soniya / 60).toString().padStart(2, '0');
-    const s = (soniya % 60).toString().padStart(2, '0');
+    const d = Math.floor(soniya / 60).toString().padStart(2, '0'); // Минуты
+    const s = (soniya % 60).toString().padStart(2, '0');           // Секунды
     return `${d}:${s}`;
   };
 
   // ==========================================
-  // ОСНОВНАЯ ИНИЦИАЛИЗАЦИЯ ЗВОНКА
+  // ОСНОВНАЯ ФУНКЦИЯ ИНИЦИАЛИЗАЦИИ ЗВОНКА
+  // 1. Запрашивает доступ к микрофону/камере
+  // 2. Отображает локальное видео
+  // 3. Подключается к WebSocket сигналинг серверу
   // ==========================================
   const boshlash = async () => {
     try {
-      // Запрашиваем доступ к микрофону и камере
+      // Настройка ограничений (constraints) для getUserMedia
       const constraints = {
-        audio: true,
-        // Камера только для видеозвонка
-        video: qongiroqTuri === 'video' ? { width: 1280, height: 720 } : false,
+        audio: true,  // Микрофон всегда нужен (и для голосового, и для видео)
+        // Камера только если это видеозвонок
+        video: qongiroqTuri === 'video'
+          ? { width: { ideal: 1280 }, height: { ideal: 720 } } // HD качество
+          : false,
       };
 
-      // Получаем медиапоток от устройств пользователя
+      // Запрашиваем доступ к медиаустройствам пользователя
       const oqim = await navigator.mediaDevices.getUserMedia(constraints);
       lokalOqim.current = oqim;
 
-      // Показываем наше видео в локальном элементе
-      if (lokalVideoRef.current) {
+      // Показываем локальное видео в маленьком окне (только для видео звонка)
+      if (lokalVideoRef.current && qongiroqTuri === 'video') {
         lokalVideoRef.current.srcObject = oqim;
       }
 
-      // Подключаемся к WebSocket сигналинг серверу
+      // Подключаемся к сигналинг серверу через WebSocket
       wsGaUlan();
 
     } catch (err) {
-      // Пользователь отказал в доступе к микрофону/камере
+      // Обработка ошибок доступа к медиаустройствам
       console.error('Ошибка доступа к медиаустройствам:', err);
-      setXato('Mikrofon yoki kameraga ruxsat berilmadi!');
+
+      if (err.name === 'NotAllowedError') {
+        setXato('Mikrofon yoki kameraga ruxsat berilmadi!');
+      } else if (err.name === 'NotFoundError') {
+        setXato('Mikrofon yoki kamera topilmadi!');
+      } else {
+        setXato('Media qurilmalarida xatolik!');
+      }
+
       setHolat('tugadi');
     }
   };
 
   // ==========================================
   // ПОДКЛЮЧЕНИЕ К WEBSOCKET СИГНАЛИНГ СЕРВЕРУ
+  // WebSocket используется для обмена SDP и ICE кандидатами
   // ==========================================
   const wsGaUlan = () => {
-    // Открываем WebSocket соединение с сигналинг сервером
-    const ws = new WebSocket(`wss://mymessenger-backend.onrender.com/calls/ws/${myId}`);
+    // Создаём WebSocket соединение с сервером
+    // URL содержит ID пользователя для идентификации
+    const wsUrl = `wss://mymessenger-backend.onrender.com/calls/ws/${myId}`;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
+    // ==========================================
+    // WebSocket СОБЫТИЕ: Соединение открыто
+    // ==========================================
     ws.onopen = () => {
-     rtcYarat();
+      console.log('WebSocket сигналинг серверга уланди');
 
-     if (chaqiruvchi) {
-       // 500ms kutamiz — ikkinchi tomon calls/ws ga ulangunicha
-       setTimeout(() => {
-         ws.send(JSON.stringify({
-           tur: 'qongiroq',
-           receiver_id: otherUser.id,
-          qongiroq_turi: qongiroqTuri,
-         }));
-       }, 500);
-     }
-   };
+      // Создаём RTCPeerConnection после установки WebSocket
+      rtcYarat();
 
-    ws.onmessage = async (event) => {
-      // Получили сигнал от сервера — обрабатываем
-      const signal = JSON.parse(event.data);
-      await signalniQayta(signal);
+      // Если мы инициатор звонка (chaqiruvchi === true)
+      if (chaqiruvchi) {
+        // Небольшая задержка (500мс) чтобы принимающая сторона
+        // успела подключиться к WebSocket
+        setTimeout(() => {
+          // Отправляем сигнал "qongiroq" — запрос на звонок
+          ws.send(JSON.stringify({
+            tur: 'qongiroq',
+            receiver_id: otherUser.id,
+            qongiroq_turi: qongiroqTuri,
+          }));
+
+          // Создаём SDP offer сразу после отправки запроса
+          // Это оптимизация — не ждём ответа "qabul_qilindi"
+          yaratVaYuborOffer();
+        }, 500);
+      }
     };
 
-    ws.onclose = () => {
-      // WebSocket закрыт — завершаем звонок
+    // ==========================================
+    // WebSocket СОБЫТИЕ: Получено сообщение
+    // Обрабатываем все сигналы от сервера
+    // ==========================================
+    ws.onmessage = async (event) => {
+      try {
+        const signal = JSON.parse(event.data);
+        console.log('Signal qabul qilindi:', signal.tur);
+        await signalniQayta(signal);
+      } catch (err) {
+        console.error('Signalni qayta ishlashda xatolik:', err);
+      }
+    };
+
+    // ==========================================
+    // WebSocket СОБЫТИЕ: Соединение закрыто
+    // ==========================================
+    ws.onclose = (event) => {
+      console.log('WebSocket yopildi:', event.code, event.reason);
+      // Если звонок ещё не завершён пользователем — завершаем автоматически
       if (holat !== 'tugadi') {
         qongiroqniTugat();
       }
     };
 
+    // ==========================================
+    // WebSocket СОБЫТИЕ: Ошибка соединения
+    // ==========================================
     ws.onerror = (err) => {
-      // Ошибка WebSocket соединения
       console.error('WebSocket xatosi:', err);
-      setXato('Ulanish xatosi!');
+      setXato('Signalizatsiya serveriga ulanishda xatolik!');
     };
   };
 
   // ==========================================
   // СОЗДАНИЕ RTCPeerConnection
-  // Настраиваем STUN серверы для NAT traversal
+  // Настраиваем STUN/TURN серверы для обхода NAT
+  // Добавляем локальные медиатреки
+  // Настраиваем обработчики событий
   // ==========================================
   const rtcYarat = () => {
-    // Конфигурация с публичными STUN серверами Google
+    // Конфигурация ICE серверов
+    // STUN — для определения публичного IP адреса
+    // TURN — для ретрансляции медиа если прямое соединение невозможно
     const config = {
       iceServers: [
+        // STUN сервер для определения внешнего IP
         {
           urls: "stun:stun.relay.metered.ca:80",
         },
+        // TURN серверы для ретрансляции (UDP и TCP)
         {
           urls: "turn:global.relay.metered.ca:80",
           username: "6f90f2d5ec8fafb71a757a0f",
@@ -212,31 +277,44 @@ function Call() {
           credential: "b9MWx+jNYUHy0iDe",
         },
       ],
+      // Политика сбора ICE кандидатов: собираем все доступные кандидаты
+      iceCandidatePoolSize: 2,
     };
 
-    // Создаём объект peer соединения
+    // Создаём новый экземпляр RTCPeerConnection
     const pc = new RTCPeerConnection(config);
     pcRef.current = pc;
 
-    // Добавляем все треки локального потока в соединение
+    // ==========================================
+    // ДОБАВЛЯЕМ ЛОКАЛЬНЫЕ МЕДИАТРЕКИ
+    // Все аудио и видео дорожки из локального потока
+    // ==========================================
     if (lokalOqim.current) {
       lokalOqim.current.getTracks().forEach((track) => {
         pc.addTrack(track, lokalOqim.current);
+        console.log('Trek qo\'shildi:', track.kind);
       });
     }
 
-    // Обработчик входящих треков от собеседника
+    // ==========================================
+    // ОБРАБОТЧИК: Получен удалённый медиатрек
+    // Срабатывает когда приходит видео/аудио от собеседника
+    // ==========================================
     pc.ontrack = (event) => {
-      if (uzoqVideoRef.current) {
-        // Показываем поток собеседника в элементе видео
+      console.log('Uzoq trek qabul qilindi:', event.track.kind);
+      // Показываем поток собеседника в основном видео элементе
+      if (uzoqVideoRef.current && event.streams[0]) {
         uzoqVideoRef.current.srcObject = event.streams[0];
       }
     };
 
-    // Обработчик новых ICE кандидатов — отправляем собеседнику
+    // ==========================================
+    // ОБРАБОТЧИК: Новый ICE кандидат
+    // Отправляем кандидата собеседнику через сигналинг сервер
+    // ==========================================
     pc.onicecandidate = (event) => {
       if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        // Отправляем ICE кандидат через сигналинг сервер
+        console.log('ICE candidate yuborilmoqda:', event.candidate.type);
         wsRef.current.send(JSON.stringify({
           tur: 'ice',
           receiver_id: otherUser.id,
@@ -245,150 +323,293 @@ function Call() {
       }
     };
 
-    // Обработчик изменения состояния соединения
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        // Соединение установлено — запускаем таймер
-        setHolat('ulandi');
-        taymerniBoshlash();
-      } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-        // Соединение разорвано — завершаем звонок
-        qongiroqniTugat();
+    // ==========================================
+    // ОБРАБОТЧИК: Изменение состояния ICE соединения
+    // Полезно для отладки проблем с сетью
+    // ==========================================
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE holati:', pc.iceConnectionState);
+      // Если ICE соединение разорвано — показываем ошибку
+      if (pc.iceConnectionState === 'failed') {
+        console.error('ICE ulanishi muvaffaqiyatsiz!');
+        setXato('Tarmoq ulanishi muvaffaqiyatsiz!');
       }
+    };
+
+    // ==========================================
+    // ОБРАБОТЧИК: Изменение состояния соединения
+    // Основной индикатор успешности подключения
+    // ==========================================
+    pc.onconnectionstatechange = () => {
+      console.log('Ulanish holati:', pc.connectionState);
+
+      switch (pc.connectionState) {
+        case 'connected':
+          // Соединение успешно установлено
+          console.log('✅ WebRTC ulandi!');
+          setHolat('ulandi');
+          taymerniBoshlash();
+          break;
+
+        case 'disconnected':
+          // Временный разрыв — возможно восстановление
+          console.warn('⚠️ Vaqtinchalik uzilish');
+          break;
+
+        case 'failed':
+          // Критический сбой соединения
+          console.error('❌ Ulanish muvaffaqiyatsiz!');
+          setXato('Ulanish uzildi!');
+          qongiroqniTugat();
+          break;
+
+        case 'closed':
+          // Соединение закрыто (нормально или после failed)
+          console.log('🔒 Ulanish yopildi');
+          if (holat !== 'tugadi') {
+            qongiroqniTugat();
+          }
+          break;
+
+        default:
+          break;
+      }
+    };
+
+    // ==========================================
+    // ОБРАБОТЧИК: Событие согласования (negotiationneeded)
+    // Не используется в этом приложении, но оставлен для информации
+    // ==========================================
+    pc.onnegotiationneeded = () => {
+      console.log('Negotiation needed — WebRTC qayta muzokara talab qilmoqda');
     };
 
     return pc;
   };
 
   // ==========================================
-  // ОБРАБОТКА ВХОДЯЩИХ СИГНАЛОВ
+  // СОЗДАНИЕ И ОТПРАВКА SDP OFFER
+  // Вызывается инициатором звонка
+  // Создаёт описание локальной сессии и отправляет собеседнику
+  // ==========================================
+  const yaratVaYuborOffer = async () => {
+    const pc = pcRef.current;
+    if (!pc || offerYaratildi.current) return;
+
+    try {
+      offerYaratildi.current = true; // Блокируем повторное создание
+      console.log('Offer yaratilmoqda...');
+
+      // Создаём SDP offer — описание наших медиа возможностей
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,  // Принимаем аудио
+        offerToReceiveVideo: qongiroqTuri === 'video', // Принимаем видео только для видео звонка
+      });
+
+      // Устанавливаем offer как локальное описание сессии
+      await pc.setLocalDescription(offer);
+      console.log('Local description o\'rnatildi (offer)');
+
+      // Отправляем offer собеседнику через сигналинг сервер
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          tur: 'offer',
+          receiver_id: otherUser.id,
+          sdp: pc.localDescription, // Отправляем полное SDP описание
+        }));
+        console.log('Offer yuborildi');
+      }
+    } catch (err) {
+      console.error('Offer yaratishda xatolik:', err);
+      setXato('Ulanish o\'rnatishda xatolik!');
+      offerYaratildi.current = false; // Сбрасываем флаг при ошибке
+    }
+  };
+
+  // ==========================================
+  // ОБРАБОТКА ВХОДЯЩИХ СИГНАЛОВ ОТ СЕРВЕРА
+  // Центральная функция обработки всех типов сигналов
   // ==========================================
   const signalniQayta = async (signal) => {
     const pc = pcRef.current;
 
     switch (signal.tur) {
 
-      // Собеседник принял звонок — создаём и отправляем offer
+      // ==========================================
+      // СИГНАЛ: "qabul_qilindi" — собеседник принял звонок
+      // Получает ТОЛЬКО инициатор звонка
+      // ==========================================
       case 'qabul_qilindi':
+        console.log('Qabul qilindi signali qabul qilindi');
         setHolat('ulashmoqda');
-        if (pc) {
-          // Создаём SDP offer — описание нашего медиапотока
-          const offer = await pc.createOffer();
-          // Устанавливаем как локальное описание
-          await pc.setLocalDescription(offer);
-          // Отправляем offer собеседнику через сигналинг
-          wsRef.current.send(JSON.stringify({
-            tur: 'offer',
-            receiver_id: otherUser.id,
-            sdp: offer,
-          }));
+        // Если offer ещё не был создан — создаём сейчас
+        // Это fallback на случай если offer не отправился при инициализации
+        if (!offerYaratildi.current) {
+          await yaratVaYuborOffer();
         }
         break;
 
-      // Получили offer — создаём и отправляем answer
+      // ==========================================
+      // СИГНАЛ: "offer" — получен SDP offer от инициатора
+      // Получает ТОЛЬКО принимающая сторона
+      // ==========================================
       case 'offer':
-        if (pc) {
-          // Устанавливаем описание собеседника как удалённое
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-          // Создаём SDP answer — наш ответ
-          const answer = await pc.createAnswer();
-          // Устанавливаем как локальное описание
-          await pc.setLocalDescription(answer);
-          // Отправляем answer обратно звонящему
-          wsRef.current.send(JSON.stringify({
-            tur: 'answer',
-            caller_id: signal.caller_id,
-            sdp: answer,
-          }));
-        }
-        break;
-
-      // Получили answer от собеседника
-      case 'answer':
-        if (pc) {
-          // Устанавливаем answer как удалённое описание
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-        }
-        break;
-
-      // Получили ICE кандидат от собеседника
-      case 'ice':
-        if (pc && signal.candidate) {
+        console.log('Offer qabul qilindi');
+        if (pc && signal.sdp) {
           try {
-            // Добавляем ICE кандидат в соединение
-            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-          } catch (e) {
-            console.error('ICE candidate xatosi:', e);
+            setHolat('ulashmoqda');
+            // Устанавливаем offer как удалённое описание сессии
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+            console.log('Remote description o\'rnatildi (offer)');
+
+            // Создаём SDP answer — наш ответ на offer
+            const answer = await pc.createAnswer();
+            // Устанавливаем answer как локальное описание
+            await pc.setLocalDescription(answer);
+            console.log('Local description o\'rnatildi (answer)');
+
+            // Отправляем answer обратно инициатору звонка
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                tur: 'answer',
+                caller_id: signal.caller_id || callerId,
+                sdp: pc.localDescription,
+              }));
+              console.log('Answer yuborildi');
+            }
+          } catch (err) {
+            console.error('Offerni qayta ishlashda xatolik:', err);
           }
         }
         break;
 
-      // Звонок отклонён собеседником
+      // ==========================================
+      // СИГНАЛ: "answer" — получен SDP answer от принимающего
+      // Получает ТОЛЬКО инициатор звонка
+      // ==========================================
+      case 'answer':
+        console.log('Answer qabul qilindi');
+        if (pc && signal.sdp) {
+          try {
+            // Устанавливаем answer как удалённое описание сессии
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+            console.log('Remote description o\'rnatildi (answer)');
+            // После этого начнётся обмен ICE кандидатами
+          } catch (err) {
+            console.error('Answerni qayta ishlashda xatolik:', err);
+          }
+        }
+        break;
+
+      // ==========================================
+      // СИГНАЛ: "ice" — получен ICE кандидат от собеседника
+      // Получают ОБЕ стороны
+      // ==========================================
+      case 'ice':
+        if (pc && signal.candidate) {
+          try {
+            // Добавляем ICE кандидата в PeerConnection
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            console.log('ICE candidate qo\'shildi:', signal.candidate.type);
+          } catch (err) {
+            console.error('ICE candidate qo\'shishda xatolik:', err);
+          }
+        }
+        break;
+
+      // ==========================================
+      // СИГНАЛ: "rad_etildi" — звонок отклонён собеседником
+      // ==========================================
       case 'rad_etildi':
+        console.log('Qo\'ng\'iroq rad etildi');
         setXato("Qo'ng'iroq rad etildi!");
         setHolat('tugadi');
-        // Автоматически закрываем экран через 2 секунды
+        // Автоматически возвращаемся назад через 2 секунды
         setTimeout(() => navigate(-1), 2000);
         break;
 
-      // Звонок завершён собеседником
+      // ==========================================
+      // СИГНАЛ: "tugatildi" — собеседник завершил звонок
+      // ==========================================
       case 'tugatildi':
+        console.log('Qo\'ng\'iroq boshqa tomon tomonidan tugatildi');
         qongiroqniTugat();
         break;
 
-      // Собеседник занят другим звонком
+      // ==========================================
+      // СИГНАЛ: "band" — собеседник занят другим звонком
+      // ==========================================
       case 'band':
+        console.log('Foydalanuvchi band');
         setXato('Foydalanuvchi hozir band!');
         setHolat('tugadi');
         setTimeout(() => navigate(-1), 2000);
         break;
 
-      // Собеседник офлайн
+      // ==========================================
+      // СИГНАЛ: "xato" — сервер сообщает об ошибке
+      // ==========================================
       case 'xato':
-        setXato(signal.xabar);
+        console.error('Server xatosi:', signal.xabar);
+        setXato(signal.xabar || 'Noma\'lum xatolik!');
         setHolat('tugadi');
         setTimeout(() => navigate(-1), 2000);
         break;
 
+      // ==========================================
+      // Неизвестный тип сигнала
+      // ==========================================
       default:
+        console.warn('Noma\'lum signal turi:', signal.tur);
         break;
     }
   };
 
   // ==========================================
   // ПРИНЯТЬ ВХОДЯЩИЙ ЗВОНОК
+  // Вызывается когда пользователь нажимает "Принять"
   // ==========================================
   const qongiroqniQabul = () => {
+    console.log('Qo\'ng\'iroq qabul qilinmoqda...');
     setHolat('ulashmoqda');
+
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      // Отправляем сигнал о принятии звонка
+      // Отправляем сигнал "qabul" инициатору звонка
       wsRef.current.send(JSON.stringify({
         tur: 'qabul',
         caller_id: callerId,
       }));
+      console.log('Qabul signali yuborildi');
     }
   };
 
   // ==========================================
   // ОТКЛОНИТЬ ВХОДЯЩИЙ ЗВОНОК
+  // Вызывается когда пользователь нажимает "Отклонить"
   // ==========================================
   const qongiroqniRad = () => {
+    console.log('Qo\'ng\'iroq rad etilmoqda...');
+
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      // Отправляем сигнал об отклонении звонка
+      // Отправляем сигнал "rad" инициатору звонка
       wsRef.current.send(JSON.stringify({
         tur: 'rad',
         caller_id: callerId,
       }));
     }
-    // Возвращаемся назад
+
+    // Возвращаемся на предыдущую страницу
     navigate(-1);
   };
 
   // ==========================================
   // ЗАВЕРШИТЬ ЗВОНОК
+  // Вызывается при нажатии кнопки "Завершить" или при обрыве соединения
   // ==========================================
   const qongiroqniTugat = useCallback(() => {
-    // Отправляем сигнал о завершении звонка собеседнику
+    console.log('Qo\'ng\'iroq tugatilmoqda...');
+
+    // Отправляем сигнал о завершении собеседнику
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         tur: 'tugatish',
@@ -396,70 +617,99 @@ function Call() {
       }));
     }
 
-    // Устанавливаем статус завершения
+    // Обновляем состояние
     setHolat('tugadi');
 
-    // Очищаем ресурсы
+    // Очищаем все ресурсы
     tozalash();
 
-    // Возвращаемся на предыдущую страницу через 1 секунду
+    // Возвращаемся назад через 1 секунду
     setTimeout(() => navigate(-1), 1000);
   }, [otherUser, navigate]);
 
   // ==========================================
-  // ОЧИСТКА РЕСУРСОВ
-  // Останавливаем все медиатреки и закрываем соединения
+  // ОЧИСТКА ВСЕХ РЕСУРСОВ
+  // Останавливаем медиа, закрываем соединения, очищаем таймеры
   // ==========================================
   const tozalash = () => {
-    // Останавливаем таймер длительности
-    if (taymerRef.current) clearInterval(taymerRef.current);
+    console.log('Resurslar tozalanmoqda...');
 
-    // Останавливаем все треки локального потока
+    // Останавливаем таймер длительности
+    if (taymerRef.current) {
+      clearInterval(taymerRef.current);
+      taymerRef.current = null;
+    }
+
+    // Останавливаем все треки локального медиапотока
+    // Это выключает камеру и микрофон
     if (lokalOqim.current) {
-      lokalOqim.current.getTracks().forEach((track) => track.stop());
+      lokalOqim.current.getTracks().forEach((track) => {
+        track.stop();
+        console.log(`${track.kind} trek to\'xtatildi`);
+      });
+      lokalOqim.current = null;
     }
 
     // Закрываем RTCPeerConnection
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
+      console.log('PeerConnection yopildi');
     }
 
     // Закрываем WebSocket соединение
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
+      console.log('WebSocket yopildi');
     }
+
+    // Сбрасываем флаг создания offer
+    offerYaratildi.current = false;
   };
 
   // ==========================================
-  // ПЕРЕКЛЮЧЕНИЕ МИКРОФОНА
+  // ПЕРЕКЛЮЧЕНИЕ МИКРОФОНА (MUTE/UNMUTE)
+  // Отключает/включает все аудиодорожки
   // ==========================================
   const mikrofonToggle = () => {
     if (lokalOqim.current) {
-      // Переключаем состояние всех аудиотреков
       lokalOqim.current.getAudioTracks().forEach((track) => {
         track.enabled = !track.enabled;
+        console.log(`Mikrofon ${track.enabled ? 'yoqildi' : 'o\'chirildi'}`);
       });
       setMikrofon((prev) => !prev);
     }
   };
 
   // ==========================================
-  // ПЕРЕКЛЮЧЕНИЕ КАМЕРЫ
+  // ПЕРЕКЛЮЧЕНИЕ КАМЕРЫ (ON/OFF)
+  // Отключает/включает все видеодорожки
   // ==========================================
   const kameraToggle = () => {
     if (lokalOqim.current) {
-      // Переключаем состояние всех видеотреков
       lokalOqim.current.getVideoTracks().forEach((track) => {
         track.enabled = !track.enabled;
+        console.log(`Kamera ${track.enabled ? 'yoqildi' : 'o\'chirildi'}`);
       });
       setKamera((prev) => !prev);
     }
   };
 
   // ==========================================
-  // РЕНДЕР — ВХОДЯЩИЙ ЗВОНОК (нам звонят)
+  // ПЕРЕКЛЮЧЕНИЕ ДИНАМИКА (только для голосового звонка)
+  // В веб-версии это визуальный индикатор
+  // Реальное управление динамиком ограничено в браузерах
+  // ==========================================
+  const dinamikToggle = () => {
+    setDinamik((prev) => !prev);
+    // В будущем можно добавить audio element management
+    console.log(`Dinamik ${!dinamik ? 'yoqildi' : 'o\'chirildi'}`);
+  };
+
+  // ==========================================
+  // РЕНДЕР: ЭКРАН ВХОДЯЩЕГО ЗВОНКА (ожидание ответа)
+  // Показывается когда нам звонят и мы ещё не ответили
   // ==========================================
   if (holat === 'kutish') {
     return (
@@ -472,7 +722,7 @@ function Call() {
         <div style={styles.animCircle2} />
         <div style={styles.animCircle3} />
 
-        {/* Содержимое экрана входящего звонка */}
+        {/* Центральный блок с информацией о звонящем */}
         <div style={styles.markaziy}>
           {/* Аватар звонящего */}
           <div style={styles.bigAvatar}>
@@ -482,24 +732,32 @@ function Call() {
           {/* Имя звонящего */}
           <div style={styles.ismKatta}>{otherUser?.full_name}</div>
 
-          {/* Тип звонка */}
+          {/* Тип звонка: видео или голосовой */}
           <div style={styles.qongiroqTuriMatn}>
-            {qongiroqTuri === 'video' ? '📹 Video qo\'ng\'iroq' : '📞 Ovozli qo\'ng\'iroq'}
+            {qongiroqTuri === 'video'
+              ? '📹 Video qo\'ng\'iroq'
+              : '📞 Ovozli qo\'ng\'iroq'}
           </div>
 
-          {/* Кнопки принять/отклонить */}
+          {/* Кнопки действий: Принять / Отклонить */}
           <div style={styles.tugmalarQator}>
-            {/* Кнопка отклонить */}
+            {/* Кнопка "Отклонить" */}
             <div style={styles.tugmaQadoq}>
-              <button style={{ ...styles.yumaloqBtn, background: '#ff3b30' }} onClick={qongiroqniRad}>
+              <button
+                style={{ ...styles.yumaloqBtn, background: '#ff3b30' }}
+                onClick={qongiroqniRad}
+              >
                 📵
               </button>
               <span style={styles.tugmaLabel}>Rad etish</span>
             </div>
 
-            {/* Кнопка принять */}
+            {/* Кнопка "Принять" */}
             <div style={styles.tugmaQadoq}>
-              <button style={{ ...styles.yumaloqBtn, background: '#34c759' }} onClick={qongiroqniQabul}>
+              <button
+                style={{ ...styles.yumaloqBtn, background: '#34c759' }}
+                onClick={qongiroqniQabul}
+              >
                 📞
               </button>
               <span style={styles.tugmaLabel}>Qabul qilish</span>
@@ -511,14 +769,15 @@ function Call() {
   }
 
   // ==========================================
-  // РЕНДЕР — ОСНОВНОЙ ЭКРАН ЗВОНКА
+  // РЕНДЕР: ОСНОВНОЙ ЭКРАН ЗВОНКА
+  // Показывается во время разговора
   // ==========================================
   return (
     <div style={styles.fullscreen}>
       {/* Фоновый градиент */}
       <div style={styles.gradient} />
 
-      {/* Видео собеседника (полный экран, фон) */}
+      {/* Видео собеседника (полный экран) — только для видео звонка */}
       {qongiroqTuri === 'video' && (
         <video
           ref={uzoqVideoRef}
@@ -528,10 +787,10 @@ function Call() {
         />
       )}
 
-      {/* Аватар собеседника (для голосового звонка) */}
+      {/* Аватар собеседника для голосового звонка */}
       {qongiroqTuri === 'ovoz' && (
         <div style={styles.ovozliMarkaziy}>
-          {/* Анимированные круги */}
+          {/* Анимированные круги пульсации (только когда соединение установлено) */}
           {holat === 'ulandi' && (
             <>
               <div style={styles.animCircle1} />
@@ -551,7 +810,7 @@ function Call() {
         {/* Имя собеседника */}
         <div style={styles.ismKatta}>{otherUser?.full_name}</div>
 
-        {/* Статус или таймер */}
+        {/* Статус соединения или таймер разговора */}
         <div style={styles.statusMatn}>
           {holat === 'ulashmoqda' && '⟳ Ulanmoqda...'}
           {holat === 'ulandi' && `🟢 ${vaqtFormat(davomiylik)}`}
@@ -559,21 +818,20 @@ function Call() {
         </div>
       </div>
 
-      {/* Наше маленькое видео (pip — picture in picture) */}
+      {/* Локальное видео (картинка-в-картинке) — только для видео звонка */}
       {qongiroqTuri === 'video' && (
         <video
           ref={lokalVideoRef}
           autoPlay
           playsInline
-          muted
+          muted  // Отключаем звук локального видео для предотвращения эха
           style={styles.lokalVideo}
         />
       )}
 
       {/* Нижняя панель управления */}
       <div style={styles.pastPanel}>
-
-        {/* Кнопка микрофона */}
+        {/* Кнопка микрофона (Mute/Unmute) */}
         <div style={styles.tugmaQadoq}>
           <button
             style={{
@@ -584,13 +842,20 @@ function Call() {
           >
             {mikrofon ? '🎤' : '🔇'}
           </button>
-          <span style={styles.tugmaLabel}>{mikrofon ? 'Mikrofon' : 'Jimlik'}</span>
+          <span style={styles.tugmaLabel}>
+            {mikrofon ? 'Mikrofon' : 'Jimlik'}
+          </span>
         </div>
 
-        {/* Кнопка завершения звонка */}
+        {/* Кнопка завершения звонка (красная, увеличенная) */}
         <div style={styles.tugmaQadoq}>
           <button
-            style={{ ...styles.yumaloqBtn, background: '#ff3b30', width: 72, height: 72 }}
+            style={{
+              ...styles.yumaloqBtn,
+              background: '#ff3b30',
+              width: 72,
+              height: 72,
+            }}
             onClick={qongiroqniTugat}
           >
             📵
@@ -598,7 +863,7 @@ function Call() {
           <span style={styles.tugmaLabel}>Tugatish</span>
         </div>
 
-        {/* Кнопка камеры (только для видеозвонка) */}
+        {/* Кнопка камеры (для видео) или динамика (для голосового) */}
         {qongiroqTuri === 'video' ? (
           <div style={styles.tugmaQadoq}>
             <button
@@ -610,21 +875,24 @@ function Call() {
             >
               {kamera ? '📹' : '📷'}
             </button>
-            <span style={styles.tugmaLabel}>{kamera ? 'Kamera' : 'O\'chiriq'}</span>
+            <span style={styles.tugmaLabel}>
+              {kamera ? 'Kamera' : 'O\'chiriq'}
+            </span>
           </div>
         ) : (
-          // Для голосового — кнопка динамика
           <div style={styles.tugmaQadoq}>
             <button
               style={{
                 ...styles.yumaloqBtn,
                 background: dinamik ? 'rgba(255,255,255,0.2)' : '#ff3b30',
               }}
-              onClick={() => setDinamik((prev) => !prev)}
+              onClick={dinamikToggle}
             >
               {dinamik ? '🔊' : '🔈'}
             </button>
-            <span style={styles.tugmaLabel}>{dinamik ? 'Dinamik' : 'Jimlik'}</span>
+            <span style={styles.tugmaLabel}>
+              {dinamik ? 'Dinamik' : 'Jimlik'}
+            </span>
           </div>
         )}
       </div>
@@ -633,10 +901,10 @@ function Call() {
 }
 
 // ==========================================
-// СТИЛИ
+// СТИЛИ ОФОРМЛЕНИЯ
 // ==========================================
 const styles = {
-  // Полноэкранный контейнер
+  // Полноэкранный контейнер с позиционированием по центру
   fullscreen: {
     position: 'fixed',
     inset: 0,
@@ -655,7 +923,7 @@ const styles = {
     background: 'linear-gradient(160deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)',
     zIndex: 0,
   },
-  // Анимированные круги (пульсация)
+  // Анимированные круги (эффект пульсации для голосового звонка)
   animCircle1: {
     position: 'absolute',
     width: 300,
@@ -683,7 +951,7 @@ const styles = {
     animation: 'pulse 2s ease-in-out infinite 1s',
     zIndex: 1,
   },
-  // Центральный блок
+  // Центральный блок содержимого
   markaziy: {
     position: 'relative',
     zIndex: 10,
@@ -692,7 +960,7 @@ const styles = {
     alignItems: 'center',
     gap: 20,
   },
-  // Большой аватар
+  // Большой аватар пользователя
   bigAvatar: {
     width: 120,
     height: 120,
@@ -708,7 +976,7 @@ const styles = {
     position: 'relative',
     zIndex: 10,
   },
-  // Имя собеседника (большое)
+  // Имя собеседника
   ismKatta: {
     fontSize: 28,
     fontWeight: '700',
@@ -717,14 +985,14 @@ const styles = {
     position: 'relative',
     zIndex: 10,
   },
-  // Тип звонка
+  // Тип звонка (видео/голосовой)
   qongiroqTuriMatn: {
     fontSize: 16,
     opacity: 0.8,
     position: 'relative',
     zIndex: 10,
   },
-  // Строка кнопок
+  // Ряд кнопок действий
   tugmalarQator: {
     display: 'flex',
     gap: 60,
@@ -732,7 +1000,7 @@ const styles = {
     position: 'relative',
     zIndex: 10,
   },
-  // Обёртка кнопки с подписью
+  // Контейнер кнопки с подписью
   tugmaQadoq: {
     display: 'flex',
     flexDirection: 'column',
@@ -760,7 +1028,7 @@ const styles = {
     opacity: 0.8,
     color: 'white',
   },
-  // Верхняя информационная панель
+  // Верхняя панель с информацией
   yuqoriPanel: {
     position: 'absolute',
     top: 60,
@@ -772,12 +1040,12 @@ const styles = {
     gap: 8,
     zIndex: 10,
   },
-  // Статус звонка
+  // Статус звонка или таймер
   statusMatn: {
     fontSize: 16,
     opacity: 0.85,
   },
-  // Нижняя панель управления
+  // Нижняя панель с кнопками управления
   pastPanel: {
     position: 'absolute',
     bottom: 60,
@@ -797,7 +1065,7 @@ const styles = {
     justifyContent: 'center',
     zIndex: 5,
   },
-  // Видео собеседника (фон, полный экран)
+  // Видео собеседника (полный экран)
   uzoqVideo: {
     position: 'absolute',
     inset: 0,
@@ -806,7 +1074,7 @@ const styles = {
     objectFit: 'cover',
     zIndex: 2,
   },
-  // Наше маленькое видео (pip)
+  // Локальное видео (картинка-в-картинке)
   lokalVideo: {
     position: 'absolute',
     top: 20,
