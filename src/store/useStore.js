@@ -1,50 +1,56 @@
+// ==========================================
+// ZUSTAND STORE — Global holat boshqaruvi
+// Barcha sahifalarda ishlatiladigan ma'lumotlar
+// ==========================================
+
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 
-const useStore = create(
-  persist(
-    (set) => ({
-      // ==========================================
-      // AUTH STATE
-      // ==========================================
-      token: null,
-      username: '',
-      userId: null,
+const useStore = create((set) => ({
+  // Foydalanuvchi ma'lumotlari
+  token: localStorage.getItem('token') || null,
+  username: localStorage.getItem('username') || '',
+  userId: parseInt(localStorage.getItem('userId')) || null,
 
-      login: (token, username, userId) => set({
-        token,
-        username,
-        userId
-      }),
+  // Til sozlamasi
+  til: localStorage.getItem('til') || 'uz',
 
-      logout: () => set({
-        token: null,
-        username: '',
-        userId: null
-      }),
+  // Foydalanuvchilar ro'yxati
+  users: [],
 
-      // ==========================================
-      // LANGUAGE STATE - TIL SAQLANADI localStorage'da
-      // ==========================================
-      til: 'uz', // Default til
+  // Aktiv chat
+  activeChatUser: null,
 
-      tilniOzgartir: (yeniTil) => {
-        console.log(`🌐 Til o'zgartirildi: ${yeniTil}`);
-        set({ til: yeniTil });
-      },
+  // ==========================================
+  // AMALLAR (Actions)
+  // ==========================================
 
-    }),
-    {
-      name: 'mymessenger-store', // localStorage key
-      partialize: (state) => ({
-        token: state.token,
-        username: state.username,
-        userId: state.userId,
-        til: state.til, // ✅ TIL SAQLANADI
-      }),
-      version: 1,
-    }
-  )
-);
+  // Tizimga kirish
+  login: (token, username, userId) => {
+    // localStorage ga saqlaymiz
+    localStorage.setItem('token', token);
+    localStorage.setItem('username', username);
+    localStorage.setItem('userId', userId);
+
+    set({ token, username, userId });
+  },
+
+  // Tizimdan chiqish
+  logout: () => {
+    localStorage.clear();
+    set({ token: null, username: '', userId: null });
+  },
+
+  // Tilni ozgartirish
+  tilniOzgartir: (yangiTil) => {
+    localStorage.setItem('til', yangiTil);
+    set({ til: yangiTil });
+  },
+
+  // Foydalanuvchilarni saqlash
+  setUsers: (users) => set({ users }),
+
+  // Aktiv chatni ozgartirish
+  setActiveChatUser: (user) => set({ activeChatUser: user }),
+}));
 
 export default useStore;

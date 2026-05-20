@@ -1,12 +1,14 @@
 // ==========================================
-// CHAT.JS — TOLIQ TUZATILGAN VERSIYA
-// Xabar, fayl, ovoz va qongiroq funksiyalari
+// CHAT SAHIFASI — Telegram uslubida
+// Real-time xabarlar, fayllar, qo'ng'iroq
 // ==========================================
 
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import { messagesAPI, filesAPI } from '../api/api';
 import useStore from '../store/useStore';
+
+const BASE_WS = 'wss://mymessenger-backend.onrender.com';
 
 function Chat() {
   const navigate = useNavigate();
@@ -17,352 +19,107 @@ function Chat() {
   const chatUser = location.state?.user;
   const otherUserId = parseInt(userId);
 
-  // ==========================================
-  // REFS
-  // ==========================================
   const wsRef = useRef(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const typingTimeoutRef = useRef(null);
+  const inputRef = useRef(null);
 
-  // ==========================================
-  // STATES
-  // ==========================================
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [connected, setConnected] = useState(false);
   const [faylYuklanmoqda, setFaylYuklanmoqda] = useState(false);
-  const [otherUserOnline, setOtherUserOnline] = useState(false);
-  const [ovozYuzmoqda, setOvozYuzmoqda] = useState(false);
-  const [ovozVaqti, setOvozVaqti] = useState(0);
-  const [otherUserTyping, setOtherUserTyping] = useState(false);
+  const [rasmModal, setRasmModal] = useState(null);
 
-  // ==========================================
-  // TRANSLATIONS
-  // ==========================================
   const TILLAR = {
-    uz: {
-      xabarYoz: 'Xabar yozing...',
-      onlayn: 'Onlayn',
-      oflayn: 'Oflayn',
-      yozayapti: 'yozayapti...',
-      boyChat: 'Salom deng! Chat boshlang 👋',
-      faylYuklanmoqda: 'Fayl yuklanmoqda...',
-      ovozYuborish: 'Ovozli xabar yuzoramiz...',
-      sahifani_orqaga: 'Orqaga',
-    },
-    ru: {
-      xabarYoz: 'Написать сообщение...',
-      onlayn: 'Онлайн',
-      oflayn: 'Офлайн',
-      yozayapti: 'печатает...',
-      boyChat: 'Скажите привет! Начните чат 👋',
-      faylYuklanmoqda: 'Загрузка файла...',
-      ovozYuborish: 'Записываем голос...',
-      sahifani_orqaga: 'Назад',
-    },
-    en: {
-      xabarYoz: 'Write a message...',
-      onlayn: 'Online',
-      oflayn: 'Offline',
-      yozayapti: 'typing...',
-      boyChat: 'Say hello! Start chatting 👋',
-      faylYuklanmoqda: 'Uploading file...',
-      ovozYuborish: 'Recording voice...',
-      sahifani_orqaga: 'Back',
-    },
+    uz: { xabarYoz:'Xabar yozing...', onlayn:'Onlayn', oflayn:'Oflayn', faylYuklanmoqda:'Fayl yuklanmoqda...', boyChat:'Salom deng! Chat boshlang 👋' },
+    ru: { xabarYoz:'Написать сообщение...', onlayn:'Онлайн', oflayn:'Офлайн', faylYuklanmoqda:'Загрузка...', boyChat:'Скажите привет! Начните чат 👋' },
+    en: { xabarYoz:'Write a message...', onlayn:'Online', oflayn:'Offline', faylYuklanmoqda:'Uploading...', boyChat:'Say hello! Start chatting 👋' },
   };
+  const t = key => TILLAR[til]?.[key] || key;
 
-  const t = (key) => TILLAR[til]?.[key] || key;
+  useEffect(() => {
+    if (!myId) return;
+    if (Notification.permission === 'default') Notification.requestPermission();
+    wsGaUlan();
+    tarixniYukla();
+    return () => { wsRef.current?.close(); };
+  }, [myId, userId]);
 
-  // ==========================================
-  // OVOZLI XABAR FUNKSIYALARI
-  // ==========================================
-
-  // ✅ OVOZLI XABAR - BOSHLASH
-  const ovozYozishiBoshla = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-
-      // MIME types - brauzer turiga qarab
-      let mimeType = 'audio/webm';
-      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mimeType = 'audio/webm;codecs=opus';
-      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-        mimeType = 'audio/mp4';
-      } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
-        mimeType = 'audio/ogg';
-      }
-
-      const recorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      let recordingTime = 0;
-      const recordingInterval = setInterval(() => {
-        recordingTime++;
-        setOvozVaqti(recordingTime);
-        if (recordingTime > 600) { // Max 10 daqiqa
-          clearInterval(recordingInterval);
-          ovozYuborishni();
-        }
-      }, 1000);
-
-      recorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
-      };
-
-      recorder.onstop = () => {
-        clearInterval(recordingInterval);
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      recorder.start();
-      setOvozYuzmoqda(true);
-      setOvozVaqti(0);
-      console.log('🎙️ Ovoz yozish boshlandi, MIME:', mimeType);
-
-    } catch (err) {
-      console.error('Mikrofon xatosi:', err);
-      alert('Mikrofonga ruxsat berishingi shukayt!');
-    }
-  };
-
-  // ✅ OVOZLI XABAR - TUGATISH VA YUBORISH
-  const ovozYuborishni = async () => {
-    if (!mediaRecorderRef.current) return;
-
-    mediaRecorderRef.current.stop();
-    setOvozYuzmoqda(false);
-
-    setTimeout(async () => {
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-
-      console.log('🎙️ Ovoz blob hajmi:', audioBlob.size, 'bytes');
-
-      if (audioBlob.size < 2048) { // 2 KB minimal
-        alert('Ovozli xabar juda qisqa!');
-        audioChunksRef.current = [];
-        return;
-      }
-
-      setFaylYuklanmoqda(true);
-
-      try {
-        const file = new File([audioBlob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
-        console.log('📤 Ovoz yuklash: ', file.name);
-
-        const res = await filesAPI.uploadVoice(file);
-        const { url, tur } = res.data;
-
-        console.log('✅ Ovoz yuklandi:', url);
-
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            receiver_id: otherUserId,
-            content: '🎙️ Ovozli xabar',
-            file_url: url,
-            file_type: tur,
-          }));
-        }
-      } catch (err) {
-        console.error('Ovoz yuklanmadi:', err);
-        alert(`Ovozli xabar yuklashda xato: ${err.response?.data?.detail || err.message}`);
-      }
-
-      setFaylYuklanmoqda(false);
-      audioChunksRef.current = [];
-    }, 100);
-  };
-
-  // ==========================================
-  // XABAR FUNKSIYALARI
-  // ==========================================
-
-  // Tarixni yuklash
   const tarixniYukla = async () => {
     try {
       const res = await messagesAPI.getHistory(userId, myId);
       setMessages(res.data);
-      pastgaTush();
+      setTimeout(pastgaTush, 100);
     } catch (e) {
       console.error('Tarix yuklanmadi:', e);
     }
   };
 
-  // WebSocket ulanish
   const wsGaUlan = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const ws = new WebSocket(`wss://mymessenger-backend.onrender.com/ws/${myId}`);
+    wsRef.current?.close();
+    const ws = new WebSocket(`${BASE_WS}/ws/${myId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      console.log('✅ Chat WebSocket ulandi');
-      setConnected(true);
-    };
+    ws.onopen = () => setConnected(true);
+    ws.onclose = () => setConnected(false);
+    ws.onerror = () => setConnected(false);
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.xato) return;
 
-        // ✅ KELAYOTGAN QONGIROQ
-        if (data.tur === 'kelayotgan_qongiroq' && data.caller_id === otherUserId) {
-          navigate('/call', {
-            state: {
-              otherUser: chatUser,
-              qongiroqTuri: data.qongiroq_turi,
-              chaqiruvchi: false,
-              callerId: data.caller_id,
-            }
-          });
-          return;
-        }
-
-        // ✅ READ RECEIPT
         if (data.type === 'oqildi_signal') {
-          if (data.message_id) {
-            setMessages(prev =>
-              prev.map(msg =>
-                msg.id === data.message_id ? { ...msg, is_read: true } : msg
-              )
-            );
+          if (data.receiver_id === otherUserId) {
+            setMessages(prev => prev.map(x =>
+              x.sender_id === myId ? { ...x, is_read: true } : x
+            ));
           }
           return;
         }
 
-        // ✅ USER TYPING
-        if (data.type === 'user_typing') {
-          if (data.user_id === otherUserId) {
-            setOtherUserTyping(data.status === 'typing');
-          }
-          return;
-        }
-
-        // ✅ ONLINE STATUS
-        if (data.type === 'user_online' && data.user_id === otherUserId) {
-          setOtherUserOnline(true);
-          return;
-        }
-
-        if (data.type === 'user_offline' && data.user_id === otherUserId) {
-          setOtherUserOnline(false);
-          return;
-        }
-
-        // ✅ NEW MESSAGE
         if (data.type === 'xabar') {
-          const isForThisChat = (data.sender_id === otherUserId && data.receiver_id === myId) ||
-                                (data.sender_id === myId && data.receiver_id === otherUserId);
-
-          if (!isForThisChat) return;
+          const buChatmi = data.sender_id === otherUserId || data.receiver_id === otherUserId;
+          if (!buChatmi) return;
 
           if (data.sender_id === otherUserId) {
             setMessages(prev => [...prev, { ...data, is_read: true }]);
             pastgaTush();
-
-            // Push notification
-            if (Notification.permission === 'granted' && document.hidden) {
-              let title = chatUser?.full_name || 'Yangi xabar';
-              let body = data.file_url ?
-                (data.file_type === 'ovoz' ? '🎙️ Ovozli xabar' : '📎 Fayl yuborildi') :
-                data.content;
-
-              new Notification(title, {
-                body: body,
+            if (Notification.permission === 'granted') {
+              new Notification(chatUser?.full_name || 'Yangi xabar', {
+                body: data.file_url ? '📎 Fayl yuborildi' : data.content,
                 icon: '/logo192.png',
-                tag: `msg-${data.sender_id}`,
               });
             }
-
-            // Mark as read
-            if (data.id && wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({
-                type: 'mark_read',
-                message_id: data.id
-              }));
-            }
+            if (data.id) messagesAPI.markRead(data.id);
           } else if (data.sender_id === myId) {
-            setMessages(prev => [...prev, data]);
+            setMessages(prev => [...prev, { ...data, is_read: false }]);
             pastgaTush();
           }
         }
-      } catch (err) {
-        console.error('WebSocket xatosi:', err);
+      } catch (e) {
+        console.error('WS xabari xato:', e);
       }
-    };
-
-    ws.onclose = () => {
-      console.log('❌ Chat WebSocket yopildi');
-      setConnected(false);
-      setTimeout(wsGaUlan, 3000);
-    };
-
-    ws.onerror = (err) => {
-      console.error('WebSocket xatosi:', err);
     };
   };
 
-  // Xabar yuborish
   const xabarYuborish = () => {
     const matn = newMessage.trim();
     if (!matn || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
-    wsRef.current.send(JSON.stringify({
-      receiver_id: otherUserId,
-      content: matn,
-    }));
+    wsRef.current.send(JSON.stringify({ receiver_id: otherUserId, content: matn }));
     setNewMessage('');
-    setOtherUserTyping(false);
+    inputRef.current?.focus();
   };
 
-  // Typing signal
-  const typingSignalYuborish = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
-    wsRef.current.send(JSON.stringify({
-      type: 'typing',
-      receiver_id: otherUserId,
-      status: 'typing'
-    }));
-
-    clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'typing',
-          receiver_id: otherUserId,
-          status: 'stopped'
-        }));
-      }
-    }, 1000);
-  };
-
-  // Fayl tanlash
-  const faylTanlash = () => {
-    fileInputRef.current?.click();
-  };
-
-  // Fayl yuborish
   const faylYuborish = async (e) => {
     const fayl = e.target.files[0];
     if (!fayl) return;
     e.target.value = '';
     setFaylYuklanmoqda(true);
-
     try {
       const res = await filesAPI.upload(fayl);
       const { url, tur, asl_nom } = res.data;
-
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           receiver_id: otherUserId,
           content: asl_nom,
@@ -370,9 +127,8 @@ function Chat() {
           file_type: tur,
         }));
       }
-    } catch (err) {
-      console.error('Fayl yuklanmadi:', err);
-      alert(`Fayl yuklashda xato: ${err.response?.data?.detail || err.message}`);
+    } catch {
+      alert('Fayl yuklashda xato!');
     }
     setFaylYuklanmoqda(false);
   };
@@ -384,31 +140,22 @@ function Chat() {
     }
   };
 
-  const handleMessageChange = (e) => {
-    setNewMessage(e.target.value);
-    if (e.target.value.trim()) {
-      typingSignalYuborish();
-    }
-  };
-
   const pastgaTush = () => {
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
   };
 
   const vaqtFormat = (vaqt) => {
     if (!vaqt) return '';
     const d = new Date(vaqt);
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
   };
 
-  // Xabar mazmuni rendering
+  const avatarColor = (id) => `hsl(${(id * 47) % 360}, 60%, 55%)`;
+
   const xabarKontent = (xabar, menYubordim) => {
     if (!xabar.file_url) {
-      return <div style={styles.xabarMatn}>{xabar.content}</div>;
+      return <div style={s.xabarMatn}>{xabar.content}</div>;
     }
-
     const fullUrl = filesAPI.toFullUrl(xabar.file_url);
 
     if (xabar.file_type === 'rasm') {
@@ -417,171 +164,133 @@ function Chat() {
           <img
             src={fullUrl}
             alt={xabar.content}
-            style={styles.rasmXabar}
-            onClick={() => window.open(fullUrl, '_blank')}
+            style={s.rasmXabar}
+            onClick={() => setRasmModal(fullUrl)}
           />
-          <div style={{ fontSize: 11, opacity: 0.8, marginTop: 4, padding: '0 4px' }}>
-            {'📷 ' + xabar.content}
+          <div style={{...s.faylNom, color: menYubordim ? 'rgba(255,255,255,0.8)' : '#888'}}>
+            📷 {xabar.content}
           </div>
         </div>
       );
     }
-
     if (xabar.file_type === 'video') {
       return (
         <div>
-          <video src={fullUrl} controls style={styles.videoXabar} />
-          <div style={{ fontSize: 11, opacity: 0.8, marginTop: 4, padding: '0 4px' }}>
-            {'🎥 ' + xabar.content}
+          <video src={fullUrl} controls style={s.videoXabar} />
+          <div style={{...s.faylNom, color: menYubordim ? 'rgba(255,255,255,0.8)' : '#888'}}>
+            🎥 {xabar.content}
           </div>
         </div>
       );
     }
-
-    // ✅ OVOZLI XABAR
-    if (xabar.file_type === 'ovoz') {
-      return (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px' }}>
-          <span>🎙️</span>
-          <audio
-            src={fullUrl}
-            controls
-            style={{ maxWidth: 200, height: 30 }}
-          />
-        </div>
-      );
-    }
-
     return (
       <a href={fullUrl} target="_blank" rel="noreferrer" style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 0',
-        textDecoration: 'none',
-        fontWeight: '500',
-        fontSize: 14,
+        ...s.hujjatLink,
         color: menYubordim ? 'white' : '#2AABEE',
+        borderColor: menYubordim ? 'rgba(255,255,255,0.3)' : '#e0f0fa',
+        background: menYubordim ? 'rgba(255,255,255,0.1)' : '#f0f8ff',
       }}>
-        {'📄 ' + xabar.content}
+        <span style={s.hujjatIcon}>📄</span>
+        <span style={{flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+          {xabar.content}
+        </span>
+        <span style={{fontSize:12, opacity:0.7}}>↓</span>
       </a>
     );
   };
 
-  // ==========================================
-  // EFFECTS
-  // ==========================================
-
-  useEffect(() => {
-    if (!myId) return;
-    tarixniYukla();
-    wsGaUlan();
-
-    if (Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
+  // Xabarlarni sanaga guruhlash
+  const xabarlarGuruhlangan = () => {
+    const groups = [];
+    let currentDate = null;
+    messages.forEach(x => {
+      const d = new Date(x.created_at);
+      const dateStr = d.toLocaleDateString('uz-UZ', { day:'numeric', month:'long' });
+      if (dateStr !== currentDate) {
+        groups.push({ type:'date', label: dateStr });
+        currentDate = dateStr;
       }
-      clearTimeout(typingTimeoutRef.current);
-    };
-  }, [myId, userId]);
-
-  // ==========================================
-  // RENDER
-  // ==========================================
+      groups.push({ type:'message', data: x });
+    });
+    return groups;
+  };
 
   return (
-    <div style={styles.container}>
+    <div style={s.container}>
+
+      {/* Rasm modal */}
+      {rasmModal && (
+        <div style={s.rasmModalBg} onClick={() => setRasmModal(null)}>
+          <img src={rasmModal} alt="preview" style={s.rasmModalImg} onClick={e => e.stopPropagation()} />
+          <button style={s.rasmModalClose} onClick={() => setRasmModal(null)}>✕</button>
+        </div>
+      )}
+
       {/* HEADER */}
-      <div style={styles.appBar}>
-        <button onClick={() => navigate('/home')} style={styles.orqaBtn}>
-          ‹
-        </button>
-        <div style={styles.avatar}>
+      <div style={s.appBar}>
+        <button onClick={() => navigate('/home')} style={s.orqaBtn}>‹</button>
+        <div style={{...s.headerAvatar, background: avatarColor(otherUserId)}}>
           {chatUser?.full_name?.[0]?.toUpperCase() || '?'}
         </div>
-        <div style={styles.userInfo}>
-          <div style={styles.userIsm}>{chatUser?.full_name || 'Foydalanuvchi'}</div>
-          <div style={styles.userHolat}>
-            {otherUserOnline ? `🟢 ${t('onlayn')}` : `⚫ ${t('oflayn')}`}
+        <div style={s.headerInfo}>
+          <div style={s.headerIsm}>{chatUser?.full_name || 'Foydalanuvchi'}</div>
+          <div style={s.headerHolat}>
+            {connected
+              ? <><span style={s.onlaynDot}/>  {t('onlayn')}</>
+              : <><span style={s.oflaynDot}/>  {t('oflayn')}</>}
           </div>
         </div>
-        <div style={styles.tugmalar}>
-          <button
-            style={styles.ikonBtn}
-            onClick={() => navigate('/call', {
-              state: {
-                otherUser: chatUser,
-                qongiroqTuri: 'ovoz',
-                chaqiruvchi: true,
-                callerId: null,
-              }
-            })}
-          >📞</button>
-          <button
-            style={styles.ikonBtn}
-            onClick={() => navigate('/call', {
-              state: {
-                otherUser: chatUser,
-                qongiroqTuri: 'video',
-                chaqiruvchi: true,
-                callerId: null,
-              }
-            })}
-          >📹</button>
+        <div style={s.headerBtns}>
+          <button style={s.headerBtn} title="Ovozli qo'ng'iroq" onClick={() => navigate('/call', {state:{otherUser:chatUser,qongiroqTuri:'ovoz',chaqiruvchi:true,callerId:null}})}>
+            📞
+          </button>
+          <button style={s.headerBtn} title="Video qo'ng'iroq" onClick={() => navigate('/call', {state:{otherUser:chatUser,qongiroqTuri:'video',chaqiruvchi:true,callerId:null}})}>
+            📹
+          </button>
         </div>
       </div>
 
-      {/* MESSAGES */}
-      <div style={styles.xabarlarQism}>
+      {/* XABARLAR */}
+      <div style={s.xabarlarQism}>
         {messages.length === 0 ? (
-          <div style={styles.boyChat}>
-            <span style={{ fontSize: 60 }}>👋</span>
-            <p>{t('boyChat')}</p>
+          <div style={s.boyChat}>
+            <span style={{fontSize:56}}>👋</span>
+            <p style={{color:'#888', fontSize:15, margin:0}}>{t('boyChat')}</p>
           </div>
         ) : (
-          messages.map((xabar, index) => {
+          xabarlarGuruhlangan().map((item, i) => {
+            if (item.type === 'date') {
+              return (
+                <div key={`date-${i}`} style={s.dateDivider}>
+                  <span style={s.dateLabel}>{item.label}</span>
+                </div>
+              );
+            }
+            const xabar = item.data;
             const menYubordim = xabar.sender_id === myId;
             const fayllimi = xabar.file_type === 'rasm' || xabar.file_type === 'video';
-
             return (
-              <div
-                key={xabar.id || index}
-                style={{
-                  ...styles.xabarQator,
-                  justifyContent: menYubordim ? 'flex-end' : 'flex-start',
-                }}
-              >
-                <div
-                  style={{
-                    ...styles.bubble,
-                    background: menYubordim ? '#2AABEE' : 'white',
-                    color: menYubordim ? 'white' : '#222',
-                    borderBottomRightRadius: menYubordim ? 4 : 16,
-                    borderBottomLeftRadius: menYubordim ? 16 : 4,
-                    padding: fayllimi ? '4px' : '10px 14px',
-                  }}
-                >
+              <div key={xabar.id || i} style={{...s.xabarQator, justifyContent: menYubordim ? 'flex-end' : 'flex-start'}}>
+                {!menYubordim && (
+                  <div style={{...s.miniAvatar, background: avatarColor(xabar.sender_id)}}>
+                    {chatUser?.full_name?.[0]?.toUpperCase() || '?'}
+                  </div>
+                )}
+                <div style={{
+                  ...s.bubble,
+                  background: menYubordim ? '#2AABEE' : 'white',
+                  color: menYubordim ? 'white' : '#111',
+                  borderBottomRightRadius: menYubordim ? 4 : 18,
+                  borderBottomLeftRadius: menYubordim ? 18 : 4,
+                  padding: fayllimi ? 4 : '8px 12px',
+                }}>
                   {xabarKontent(xabar, menYubordim)}
-                  <div style={{
-                    ...styles.xabarPastki,
-                    padding: fayllimi ? '0 8px 4px' : 0,
-                  }}>
-                    <span style={{
-                      color: menYubordim ? 'rgba(255,255,255,0.7)' : '#aaa',
-                      fontSize: 11,
-                    }}>
+                  <div style={{...s.xabarPastki, padding: fayllimi ? '0 8px 4px' : '2px 0 0'}}>
+                    <span style={{color: menYubordim ? 'rgba(255,255,255,0.7)' : '#aaa', fontSize:11}}>
                       {vaqtFormat(xabar.created_at)}
                     </span>
                     {menYubordim && (
-                      <span style={{
-                        fontSize: 11,
-                        marginLeft: 4,
-                        color: xabar.is_read ? 'rgba(255,255,255,1)' : 'rgba(255,255,255,0.5)',
-                      }}>
+                      <span style={{fontSize:12, marginLeft:3, color: xabar.is_read ? 'rgba(255,255,255,1)' : 'rgba(255,255,255,0.5)'}}>
                         {xabar.is_read ? '✓✓' : '✓'}
                       </span>
                     )}
@@ -591,241 +300,79 @@ function Chat() {
             );
           })
         )}
-
-        {/* Typing indicator */}
-        {otherUserTyping && (
-          <div style={styles.typingIndicator}>
-            <span>🟢 {t('yozayapti')}</span>
-          </div>
-        )}
-
         <div ref={messagesEndRef} />
       </div>
 
       {/* INPUT */}
-      <div style={styles.inputQism}>
-        <input
-          ref={fileInputRef}
-          type="file"
-          style={{ display: 'none' }}
-          accept="image/*,video/*,.pdf,.doc,.docx,.txt"
-          onChange={faylYuborish}
+      <div style={s.inputQism}>
+        <input ref={fileInputRef} type="file" style={{display:'none'}}
+          accept="image/*,video/*,.pdf,.doc,.docx,.txt" onChange={faylYuborish} />
+        <button style={{...s.ikonBtn, opacity: faylYuklanmoqda ? 0.5 : 1}}
+          onClick={() => fileInputRef.current?.click()} disabled={faylYuklanmoqda}>
+          {faylYuklanmoqda ? '⏳' : '📎'}
+        </button>
+        <textarea
+          ref={inputRef}
+          style={s.input}
+          placeholder={faylYuklanmoqda ? t('faylYuklanmoqda') : t('xabarYoz')}
+          value={newMessage}
+          onChange={e => setNewMessage(e.target.value)}
+          onKeyPress={handleKeyPress}
+          rows={1}
+          disabled={faylYuklanmoqda}
         />
-
-        {/* ✅ OVOZLI XABAR TUGMALARI */}
-        {ovozYuzmoqda ? (
-          <>
-            <button
-              style={{
-                ...styles.ikonBtn,
-                background: '#ff3b30',
-                borderRadius: '50%',
-                color: 'white',
-                width: 44,
-                height: 44,
-              }}
-              onClick={ovozYuborishni}
-            >✓</button>
-            <div style={{
-              flex: 1,
-              textAlign: 'center',
-              color: '#666',
-              fontSize: 14,
-            }}>
-              🎙️ {t('ovozYuborish')} ({ovozVaqti}s)
-            </div>
-          </>
-        ) : (
-          <>
-            <button
-              style={{ ...styles.ikonBtn, opacity: faylYuklanmoqda ? 0.5 : 1 }}
-              onClick={faylTanlash}
-              disabled={faylYuklanmoqda}
-            >{faylYuklanmoqda ? '⏳' : '📎'}</button>
-
-            <button
-              style={{ ...styles.ikonBtn }}
-              onMouseDown={ovozYozishiBoshla}
-              onMouseUp={ovozYuborishni}
-              onTouchStart={(e) => {
-                e.preventDefault();
-                ovozYozishiBoshla();
-              }}
-              onTouchEnd={(e) => {
-                e.preventDefault();
-                ovozYuborishni();
-              }}
-            >🎙️</button>
-
-            <textarea
-              style={styles.input}
-              placeholder={faylYuklanmoqda ? t('faylYuklanmoqda') : t('xabarYoz')}
-              value={newMessage}
-              onChange={handleMessageChange}
-              onKeyPress={handleKeyPress}
-              rows={1}
-              disabled={faylYuklanmoqda}
-            />
-
-            <button
-              style={{
-                ...styles.yuborishBtn,
-                background: newMessage.trim() && !faylYuklanmoqda ? '#2AABEE' : '#ccc',
-              }}
-              onClick={xabarYuborish}
-              disabled={!newMessage.trim() || faylYuklanmoqda}
-            >➤</button>
-          </>
-        )}
+        <button
+          style={{...s.yuborishBtn, background: newMessage.trim() && !faylYuklanmoqda ? '#2AABEE' : '#ccc'}}
+          onClick={xabarYuborish}
+          disabled={!newMessage.trim() || faylYuklanmoqda}
+        >
+          <span style={{fontSize:18}}>➤</span>
+        </button>
       </div>
     </div>
   );
 }
 
-// ==========================================
-// STYLES
-// ==========================================
+const s = {
+  container: { display:'flex', flexDirection:'column', height:'100vh', fontFamily:"'Segoe UI', sans-serif", background:'#eee9e3', backgroundImage:"url(\"data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none'%3E%3Cg fill='%23c8c0b8' fill-opacity='0.3'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E\")" },
 
-const styles = {
-  container: {
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    fontFamily: 'Segoe UI, sans-serif',
-    background: '#f0f2f5',
-  },
-  appBar: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    padding: '12px 16px',
-    background: '#2AABEE',
-    color: 'white',
-    boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
-  },
-  orqaBtn: {
-    background: 'none',
-    border: 'none',
-    color: 'white',
-    fontSize: 32,
-    cursor: 'pointer',
-    lineHeight: 1,
-    padding: 0,
-  },
-  avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: '50%',
-    background: 'rgba(255,255,255,0.3)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontWeight: 'bold',
-    fontSize: 18,
-    flexShrink: 0,
-  },
-  userInfo: { flex: 1 },
-  userIsm: { fontWeight: 'bold', fontSize: 16 },
-  userHolat: { fontSize: 12, opacity: 0.9 },
-  tugmalar: { display: 'flex', gap: 4 },
-  ikonBtn: {
-    background: 'none',
-    border: 'none',
-    fontSize: 22,
-    cursor: 'pointer',
-    padding: '4px 8px',
-    borderRadius: 8,
-    color: 'white',
-  },
-  xabarlarQism: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '16px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-  },
-  boyChat: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    color: '#aaa',
-    fontSize: 16,
-    gap: 8,
-  },
-  xabarQator: { display: 'flex', marginBottom: 4 },
-  bubble: {
-    maxWidth: '70%',
-    borderRadius: 16,
-    boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
-    overflow: 'hidden',
-  },
-  xabarMatn: { fontSize: 15, lineHeight: 1.4, wordBreak: 'break-word' },
-  xabarPastki: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    marginTop: 4,
-    gap: 2,
-  },
-  rasmXabar: {
-    maxWidth: '100%',
-    maxHeight: 300,
-    borderRadius: 12,
-    display: 'block',
-    cursor: 'pointer',
-    objectFit: 'cover',
-  },
-  videoXabar: {
-    maxWidth: '100%',
-    maxHeight: 300,
-    borderRadius: 12,
-    display: 'block',
-  },
-  typingIndicator: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    padding: '8px 16px',
-    color: '#999',
-    fontSize: 13,
-    fontStyle: 'italic',
-  },
-  inputQism: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    padding: '8px 16px',
-    background: 'white',
-    boxShadow: '0 -2px 10px rgba(0,0,0,0.05)',
-  },
-  input: {
-    flex: 1,
-    padding: '10px 16px',
-    borderRadius: 24,
-    border: '1px solid #eee',
-    background: '#f5f5f5',
-    outline: 'none',
-    fontSize: 15,
-    resize: 'none',
-    fontFamily: 'inherit',
-    maxHeight: 120,
-  },
-  yuborishBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: '50%',
-    border: 'none',
-    color: 'white',
-    fontSize: 18,
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
+  // Rasm modal
+  rasmModalBg: { position:'fixed', inset:0, background:'rgba(0,0,0,0.9)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' },
+  rasmModalImg: { maxWidth:'90vw', maxHeight:'90vh', borderRadius:8, objectFit:'contain' },
+  rasmModalClose: { position:'absolute', top:20, right:20, background:'rgba(255,255,255,0.2)', border:'none', color:'white', fontSize:20, width:40, height:40, borderRadius:'50%', cursor:'pointer' },
+
+  appBar: { display:'flex', alignItems:'center', gap:10, padding:'10px 16px', background:'#2AABEE', color:'white', boxShadow:'0 2px 8px rgba(0,0,0,0.15)', flexShrink:0 },
+  orqaBtn: { background:'none', border:'none', color:'white', fontSize:30, cursor:'pointer', lineHeight:1, padding:0, marginRight:4 },
+  headerAvatar: { width:42, height:42, borderRadius:'50%', color:'white', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:'bold', fontSize:18, flexShrink:0 },
+  headerInfo: { flex:1 },
+  headerIsm: { fontWeight:'700', fontSize:16 },
+  headerHolat: { fontSize:12, opacity:0.9, display:'flex', alignItems:'center', gap:4 },
+  onlaynDot: { width:8, height:8, borderRadius:'50%', background:'#90EE90', display:'inline-block' },
+  oflaynDot: { width:8, height:8, borderRadius:'50%', background:'rgba(255,255,255,0.5)', display:'inline-block' },
+  headerBtns: { display:'flex', gap:4 },
+  headerBtn: { background:'rgba(255,255,255,0.15)', border:'none', borderRadius:10, padding:'6px 10px', fontSize:18, cursor:'pointer', color:'white', transition:'background 0.2s' },
+
+  xabarlarQism: { flex:1, overflowY:'auto', padding:'12px 16px', display:'flex', flexDirection:'column', gap:2 },
+  boyChat: { flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:12, marginTop:'30%' },
+
+  dateDivider: { display:'flex', justifyContent:'center', margin:'8px 0' },
+  dateLabel: { background:'rgba(0,0,0,0.35)', color:'white', fontSize:12, padding:'3px 12px', borderRadius:12, backdropFilter:'blur(4px)' },
+
+  xabarQator: { display:'flex', alignItems:'flex-end', gap:6, marginBottom:2 },
+  miniAvatar: { width:28, height:28, borderRadius:'50%', color:'white', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, fontWeight:'bold', flexShrink:0 },
+  bubble: { maxWidth:'68%', borderRadius:18, boxShadow:'0 1px 2px rgba(0,0,0,0.1)', overflow:'hidden' },
+  xabarMatn: { fontSize:15, lineHeight:1.45, wordBreak:'break-word', padding:'0 2px' },
+  xabarPastki: { display:'flex', justifyContent:'flex-end', alignItems:'center', gap:2 },
+  faylNom: { fontSize:11, padding:'2px 6px 4px', opacity:0.8 },
+  rasmXabar: { maxWidth:'100%', maxHeight:280, display:'block', cursor:'pointer', objectFit:'cover' },
+  videoXabar: { maxWidth:'100%', maxHeight:280, display:'block' },
+  hujjatLink: { display:'flex', alignItems:'center', gap:8, padding:'10px 12px', textDecoration:'none', borderRadius:12, border:'1px solid', fontSize:14, fontWeight:'500' },
+  hujjatIcon: { fontSize:24, flexShrink:0 },
+
+  inputQism: { display:'flex', alignItems:'center', gap:8, padding:'8px 12px', background:'white', boxShadow:'0 -1px 8px rgba(0,0,0,0.06)', flexShrink:0 },
+  ikonBtn: { background:'none', border:'none', fontSize:22, cursor:'pointer', padding:'6px', borderRadius:10, color:'#666', flexShrink:0 },
+  input: { flex:1, padding:'10px 14px', borderRadius:22, border:'1px solid #e8e8e8', background:'#f8f8f8', outline:'none', fontSize:15, resize:'none', fontFamily:'inherit', maxHeight:120, lineHeight:1.4 },
+  yuborishBtn: { width:42, height:42, borderRadius:'50%', border:'none', color:'white', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, transition:'background 0.2s' },
 };
 
 export default Chat;
